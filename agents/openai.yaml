@@ -1,0 +1,4 @@
+interface:
+  display_name: "Malak Codex Orchestration Setup"
+  short_description: "Set up project-local Codex subagent workflows"
+  default_prompt: "Use $malak-codex-orchestration-setup to configure project subagents from role markdown files and a shared pipeline without copying those source files."
