@@ -199,18 +199,21 @@ Core rules:
 - Default mode: if I give a task, pass it unchanged to the role that should act next under `{pipeline_path}`.
 - Exception: only treat my message as an orchestration request when I explicitly ask about routing, handoff, pause/resume, limits, role choice, or fixing the workflow.
 - All handoffs go through the main orchestrator thread; child threads must not continue each other directly.
+- Run exactly one child agent at a time. Parallel child-agent execution is forbidden, including validation roles.
+- If multiple validation roles are required, run them sequentially and wait for each validation role to finish before starting the next one.
 - When a child move advances the pipeline, reread `{pipeline_path}`, detect the latest `HANDOFF: ...` marker when used, and route the next move automatically without waiting for my reminder.
 - Pause only for a terminal condition, a safety-cap hit, or a blocking `USER QUESTION:`. Surface blocking user questions in the main chat immediately, especially from the architect.
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
 
 Initialization task:
-1. Spawn all configured agents once.
-2. Have each agent read its role file and the shared pipeline, then report:
+1. Initialize the configured agents sequentially, one at a time.
+2. For each agent, have it read its role file and the shared pipeline, then report:
    - mission
    - expected inputs
    - expected outputs
    - any immediate `USER QUESTION:`
-3. Return a consolidated readiness report, then wait for my first task.
+3. Do not start the next initialization agent until the current one has finished.
+4. Return a consolidated readiness report, then wait for my first task.
 
 Configured roles:
 {role_lines}
@@ -249,6 +252,9 @@ The role markdown files and the shared pipeline remain at their original source 
 - The main chat is the orchestrator. Child agents report back to the main thread for handoff.
 - The main orchestrator must not perform the substantive work of the configured child roles; it may only orchestrate, route, summarize, and relay according to the pipeline.
 - Ordinary user tasks must be passed to the next role per pipeline in the form the user wrote them, unless the user is explicitly asking an orchestration question or issuing an orchestration command.
+- The main orchestrator must run exactly one child agent at a time.
+- Parallel child-agent execution is forbidden, including validation roles.
+- If multiple validation roles are required, the orchestrator must run them sequentially and wait for each validation role to finish before starting the next one.
 - Keep separate agent threads so the user can intervene manually in a specific role thread.
 - Follow the shared pipeline file for sequencing, dependencies, and handoff expectations.
 - If a source role file or the pipeline changes, reread it from the original path instead of duplicating it.

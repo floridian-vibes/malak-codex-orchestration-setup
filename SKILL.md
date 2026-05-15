@@ -19,6 +19,7 @@ This skill is setup-oriented:
 - render the initialization prompt the user can paste into the main Codex chat;
 - configure the main orchestrator for automatic handoffs through the main thread by default;
 - keep the main orchestrator in a coordination-only role instead of letting it do agent work itself;
+- force all child agents to run strictly sequentially, including validation roles;
 - force user-facing questions from subagents, especially the architect, to be relayed in the main chat;
 - avoid copying role or pipeline files into `.codex` or elsewhere in the project.
 
@@ -153,6 +154,7 @@ No canonical git prefix is required for the normal workflow.
    - create `.codex/prompts/subagent-init.md`;
    - create or update `AGENTS.md` using a managed block;
    - embed `Auto-Handoff Mode` rules for the main orchestrator;
+   - embed `Sequential Execution` rules that forbid parallel child-agent runs, including parallel validation;
    - embed `User Question Relay` rules so architect questions are surfaced in the main chat;
    - write the selected `model_reasoning_effort` into each generated subagent TOML;
    - write the selected max handoff cap into the generated orchestration docs;
@@ -170,6 +172,9 @@ Required behavior:
 - When the user asks to start or continue the configured workflow, the main orchestrator must run automatic handoff by default.
 - The main orchestrator must not perform the substantive work assigned to child roles; it may only orchestrate, route, summarize, and relay according to the pipeline.
 - Ordinary user tasks must be passed to the next role per pipeline in the form the user wrote them, unless the user is explicitly asking an orchestration question or issuing an orchestration command.
+- The main orchestrator must run exactly one child agent at a time.
+- Parallel child-agent execution is forbidden.
+- Validation roles must also run one after another. Do not start Code Reviewer, Scenario Tester, Security Auditor, or any other validation role in parallel; wait for one validation role to finish before starting the next required validation role.
 - After each child agent finishes one move, the main orchestrator must:
   - read the full shared pipeline file from its original path;
   - detect the latest `HANDOFF: ...` marker when the pipeline uses that convention;
