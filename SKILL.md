@@ -1,6 +1,6 @@
 ---
 name: malak-codex-orchestration-setup
-description: "Set up a project-local Codex subagent workflow from existing role markdown files and a shared pipeline file without copying those source files. Use when the user wants Codex to create `.codex/agents/*.toml`, render the main initialization prompt, and create or update project `AGENTS.md` for a reusable orchestration setup."
+description: "Set up a project-local Codex subagent workflow from existing role markdown files and a shared pipeline file without copying those source files. Use when the user wants Codex to create `.codex/agents/*.toml`, render the main orchestration prompt, and create or update project `AGENTS.md` for a reusable orchestration setup."
 ---
 
 # Malak Codex Orchestration Setup
@@ -16,7 +16,7 @@ This skill is setup-oriented:
 - keep role markdown files and the pipeline file at their source paths;
 - create project-local Codex agent definitions that point at those original files;
 - create or update project `AGENTS.md` with orchestration guidance Codex can read automatically;
-- render the initialization prompt the user can paste into the main Codex chat;
+- render the orchestration prompt the user can paste into the main Codex chat;
 - configure the main orchestrator for automatic handoffs through the main thread by default;
 - keep the main orchestrator in a coordination-only role instead of letting it do agent work itself;
 - force all child agents to run strictly sequentially, including validation roles;
@@ -150,6 +150,7 @@ No canonical git prefix is required for the normal workflow.
     "/absolute/path/to/implementer.md",
     "/absolute/path/to/reviewer.md"
   ],
+  "prompt_mode": "execute subagents",
   "reasoning_level": "medium",
   "max_handoff_turns": 12
 }
@@ -168,10 +169,11 @@ No canonical git prefix is required for the normal workflow.
    - embed `User Question Relay` rules so architect questions are surfaced in the main chat;
    - write the selected `model_reasoning_effort` into each generated subagent TOML;
    - write the selected max handoff cap into the generated orchestration docs;
+   - write the selected prompt mode into the generated orchestration docs;
    - keep role and pipeline source files at their original paths;
-   - return the rendered initialization prompt and the written file paths.
-13. Return the initialization prompt in the final answer, plus the key file paths that were written.
-14. On reruns for an already configured project, render the same initialization prompt from the current inputs instead of switching to a shortened, delta-only, or repair-only prompt.
+   - return the rendered orchestration prompt and the written file paths.
+13. Return the orchestration prompt in the final answer, plus the key file paths that were written.
+14. On reruns for an already configured project, render the same orchestration prompt from the current inputs instead of switching to a shortened, delta-only, or repair-only prompt.
 
 ## Auto-Handoff Mode
 
@@ -195,6 +197,8 @@ Required behavior:
 - If the user configures a project-specific max handoff cap during setup, generated project docs should use that configured value as the workflow default until explicitly overridden.
 - The generated `AGENTS.md` and `.codex/prompts/subagent-init.md` should both carry these rules so the behavior survives reuse across future tasks.
 - The generated prompt should state this compactly so the orchestration intent is clear without unnecessary extra text.
+- In `initialize subagents` prompt mode, the generated prompt should initialize configured child agents and collect readiness reports.
+- In `execute subagents` prompt mode, the generated prompt must explicitly forbid readiness-only initialization and require child agents to perform their roles for the current task or run context.
 
 ## User Question Relay
 
@@ -230,12 +234,13 @@ Return:
 
 - a short confirmation that the orchestration setup was written
 - the target project path
+- the prompt mode that was applied
 - the reasoning level that was applied
 - the max handoff turns that were applied
 - the final agent names that were created
 - the paths to `AGENTS.md` and `.codex/prompts/subagent-init.md`
-- the initialization prompt text ready to paste into the main Codex chat
-- on reruns, the same full initialization prompt shape as on the first run
+- the orchestration prompt text ready to paste into the main Codex chat
+- on reruns, the same full orchestration prompt shape as on the first run
 - any warnings, such as slug collisions or pre-existing managed blocks that were refreshed
 
 If the helper reports an error, return a short error explanation and the blocker.
