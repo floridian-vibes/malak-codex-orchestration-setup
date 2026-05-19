@@ -198,6 +198,7 @@ Required behavior:
 - The generated prompt should state this compactly so the orchestration intent is clear without unnecessary extra text.
 - In `initialize subagents` prompt mode, the generated prompt should initialize configured child agents and collect readiness reports.
 - In `execute subagents` prompt mode, the generated prompt must explicitly forbid readiness-only initialization and require child agents to perform their roles for the current task or run context.
+- Missing local artifact or output directories are not blockers. Generated docs must tell the orchestrator or child agent to create them before handoff or before writing, and to block only if directory creation fails.
 
 ## User Question Relay
 

@@ -237,6 +237,7 @@ Core rules:
 - If multiple validation roles are required, run them sequentially and wait for each validation role to finish before starting the next one.
 - When a child move advances the pipeline, reread `{pipeline_path}`, detect the latest `HANDOFF: ...` marker when used, and route the next move automatically without waiting for my reminder.
 - Pause only for a terminal condition, a safety-cap hit, or a blocking `USER QUESTION:`. Surface blocking user questions in the main chat immediately, especially from the architect.
+- If a required local artifact or output directory is missing, create it before handoff or before writing. Treat it as a blocker only if directory creation fails.
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
 - Prompt mode: `{prompt_mode}`.
 
@@ -290,6 +291,7 @@ The role markdown files and the shared pipeline remain at their original source 
 - The standard orchestration prompt lives at `.codex/prompts/subagent-init.md`.
 - In `initialize subagents` prompt mode, use the prompt only to initialize child agents and collect readiness reports.
 - In `execute subagents` prompt mode, use the prompt to make child agents perform their roles for the current task or run context and produce the role-specific outputs required by the pipeline.
+- Missing local artifact or output directories are not blockers. The orchestrator or child agent must create them before handoff or before writing; block only if creation fails.
 
 ### Auto-Handoff Mode
 
