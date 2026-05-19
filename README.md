@@ -13,6 +13,8 @@ Role path:
 - Scenario Tester: `<local root>/agents/scenario-tester.md`
 - Security Auditor: `<local root>/agents/security-auditor.md`
 
+Prompt mode: execute
+
 Reasoning: high
 
 Max handoff turns: 15

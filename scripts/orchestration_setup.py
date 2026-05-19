@@ -15,6 +15,28 @@ MANAGED_END = "<!-- END MALAK CODEX ORCHESTRATION SETUP -->"
 DEFAULT_SAFETY_CAP = 12
 DEFAULT_REASONING_LEVEL = "medium"
 ALLOWED_REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh")
+DEFAULT_PROMPT_MODE = "execute"
+ALLOWED_PROMPT_MODES = ("initialize", "execute")
+PROMPT_MODE_ALIASES = {
+    "init": "initialize",
+    "initialize": "initialize",
+    "initialise": "initialize",
+    "initialization": "initialize",
+    "initialisation": "initialize",
+    "инициализировать": "initialize",
+    "инициализация": "initialize",
+    "initialize agents": "initialize",
+    "execute": "execute",
+    "execution": "execute",
+    "run": "execute",
+    "work": "execute",
+    "исполнять": "execute",
+    "выполнять": "execute",
+    "исполнение": "execute",
+    "выполнение": "execute",
+    "исполнять умолчательные инструкции": "execute",
+    "исполнять инструкции по умолчанию": "execute",
+}
 
 
 @dataclass
@@ -87,7 +109,20 @@ def derive_roles(role_paths: list[Path]) -> tuple[list[RoleSpec], list[str]]:
     return roles, warnings
 
 
-def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec], str, int, list[str]]:
+def normalize_prompt_mode(raw_prompt_mode: Any) -> str:
+    if raw_prompt_mode in (None, ""):
+        return DEFAULT_PROMPT_MODE
+    if not isinstance(raw_prompt_mode, str):
+        raise ValueError("prompt_mode must be a string")
+    normalized = re.sub(r"\s+", " ", raw_prompt_mode.strip().lower())
+    prompt_mode = PROMPT_MODE_ALIASES.get(normalized, normalized)
+    if prompt_mode not in ALLOWED_PROMPT_MODES:
+        allowed = ", ".join(ALLOWED_PROMPT_MODES)
+        raise ValueError(f"prompt_mode must be one of: {allowed}")
+    return prompt_mode
+
+
+def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec], str, int, str, list[str]]:
     raw_project_root = payload.get("project_root")
     if isinstance(raw_project_root, str) and raw_project_root.strip():
         project_root = resolve_path(raw_project_root, "project_root")
@@ -121,6 +156,7 @@ def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec
         raise ValueError("max_handoff_turns must be an integer")
     if max_handoff_turns <= 0:
         raise ValueError("max_handoff_turns must be greater than 0")
+    prompt_mode = normalize_prompt_mode(payload.get("prompt_mode"))
 
     role_paths: list[Path] = []
     for index, raw_role_path in enumerate(raw_role_paths, start=1):
@@ -148,7 +184,7 @@ def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec
         raise ValueError("; ".join(errors))
 
     roles, warnings = derive_roles(role_paths)
-    return project_root, pipeline_path, roles, reasoning_level, max_handoff_turns, warnings
+    return project_root, pipeline_path, roles, reasoning_level, max_handoff_turns, prompt_mode, warnings
 
 
 def toml_escape(value: str) -> str:
@@ -189,9 +225,29 @@ def build_prompt_text(
     pipeline_path: Path,
     reasoning_level: str,
     max_handoff_turns: int,
+    prompt_mode: str,
 ) -> str:
     role_names = ", ".join(role.slug for role in roles)
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
+    if prompt_mode == "initialize":
+        mode_task = """Initialization task:
+1. Initialize the configured agents sequentially, one at a time.
+2. For each agent, have it read its role file and the shared pipeline, then report:
+   - mission
+   - expected inputs
+   - expected outputs
+   - any immediate `USER QUESTION:`
+3. Do not start the next initialization agent until the current one has finished.
+4. Return a consolidated readiness report, then wait for my first task."""
+    else:
+        mode_task = """Execution task:
+1. Do not run a readiness-only initialization pass.
+2. Run the configured agents sequentially, one at a time, according to the shared pipeline and the task or run context I provide.
+3. For each agent, have it read its role file and the shared pipeline, then perform its role for the current workflow.
+4. Give each child agent the current task or run context, the artifact or output requirements from the pipeline, and an explicit instruction to save or return the role-specific output expected by its role and the pipeline.
+5. If a required run context, source, artifact root, or output target is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
+6. Do not start the next agent until the current one has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
+7. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
     return f"""Use these configured project subagents: {role_names}.
 
 Core rules:
@@ -204,16 +260,9 @@ Core rules:
 - When a child move advances the pipeline, reread `{pipeline_path}`, detect the latest `HANDOFF: ...` marker when used, and route the next move automatically without waiting for my reminder.
 - Pause only for a terminal condition, a safety-cap hit, or a blocking `USER QUESTION:`. Surface blocking user questions in the main chat immediately, especially from the architect.
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
+- Prompt mode: `{prompt_mode}`.
 
-Initialization task:
-1. Initialize the configured agents sequentially, one at a time.
-2. For each agent, have it read its role file and the shared pipeline, then report:
-   - mission
-   - expected inputs
-   - expected outputs
-   - any immediate `USER QUESTION:`
-3. Do not start the next initialization agent until the current one has finished.
-4. Return a consolidated readiness report, then wait for my first task.
+{mode_task}
 
 Configured roles:
 {role_lines}
@@ -228,6 +277,7 @@ def build_agents_md_block(
     pipeline_path: Path,
     reasoning_level: str,
     max_handoff_turns: int,
+    prompt_mode: str,
 ) -> str:
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
     return f"""{MANAGED_BEGIN}
@@ -241,6 +291,7 @@ The role markdown files and the shared pipeline remain at their original source 
 - Shared pipeline: `{pipeline_path}`
 - Default reasoning level: `{reasoning_level}`
 - Default max handoff turns: `{max_handoff_turns}`
+- Default prompt mode: `{prompt_mode}`
 
 ### Role Files
 
@@ -258,7 +309,9 @@ The role markdown files and the shared pipeline remain at their original source 
 - Keep separate agent threads so the user can intervene manually in a specific role thread.
 - Follow the shared pipeline file for sequencing, dependencies, and handoff expectations.
 - If a source role file or the pipeline changes, reread it from the original path instead of duplicating it.
-- The standard initialization prompt lives at `.codex/prompts/subagent-init.md`.
+- The standard orchestration prompt lives at `.codex/prompts/subagent-init.md`.
+- In `execute` prompt mode, the orchestrator must make child agents perform their roles for the current task or run context and produce the role-specific outputs required by the pipeline.
+- In `initialize` prompt mode, the orchestrator may ask child agents only for readiness information and must not treat that readiness pass as substantive execution.
 
 ### Auto-Handoff Mode
 
@@ -310,6 +363,7 @@ def write_setup(
     roles: list[RoleSpec],
     reasoning_level: str,
     max_handoff_turns: int,
+    prompt_mode: str,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     written_paths: list[str] = []
@@ -330,7 +384,13 @@ def write_setup(
         )
         written_paths.append(str(agent_path))
 
-    prompt_text = build_prompt_text(roles, pipeline_path, reasoning_level, max_handoff_turns)
+    prompt_text = build_prompt_text(
+        roles,
+        pipeline_path,
+        reasoning_level,
+        max_handoff_turns,
+        prompt_mode,
+    )
     prompt_path.write_text(prompt_text, encoding="utf-8")
     written_paths.append(str(prompt_path))
 
@@ -339,6 +399,7 @@ def write_setup(
         pipeline_path,
         reasoning_level,
         max_handoff_turns,
+        prompt_mode,
     )
     agents_md_content, replaced_managed_block = update_agents_md(agents_md_path, agents_md_block)
     agents_md_path.write_text(agents_md_content, encoding="utf-8")
@@ -353,6 +414,7 @@ def write_setup(
         "pipeline_path": str(pipeline_path),
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
+        "prompt_mode": prompt_mode,
         "agent_names": [role.slug for role in roles],
         "roles": [
             {
@@ -376,6 +438,7 @@ def doctor(
     roles: list[RoleSpec],
     reasoning_level: str,
     max_handoff_turns: int,
+    prompt_mode: str,
     warnings: list[str],
 ) -> dict[str, Any]:
     planned_paths = [
@@ -390,6 +453,7 @@ def doctor(
         "pipeline_path": str(pipeline_path),
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
+        "prompt_mode": prompt_mode,
         "agent_names": [role.slug for role in roles],
         "roles": [
             {
@@ -420,6 +484,7 @@ def main() -> int:
             roles,
             reasoning_level,
             max_handoff_turns,
+            prompt_mode,
             warnings,
         ) = validate_payload(payload)
         if args.command == "doctor":
@@ -429,6 +494,7 @@ def main() -> int:
                 roles,
                 reasoning_level,
                 max_handoff_turns,
+                prompt_mode,
                 warnings,
             )
         else:
@@ -438,6 +504,7 @@ def main() -> int:
                 roles,
                 reasoning_level,
                 max_handoff_turns,
+                prompt_mode,
             )
             result["warnings"] = warnings + result.get("warnings", [])
         print(json.dumps(result, indent=2))
