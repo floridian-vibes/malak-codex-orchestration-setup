@@ -45,7 +45,7 @@ This skill is setup-oriented:
 
 ## Required Inputs
 
-Collect inputs in this order. For a new setup request, prefer the bundled canonical first question whenever the user has not already returned the setup block. After the user has returned the setup block, ask only for the next missing item.
+Collect inputs in this order. In interactive mode, if the current user message does not already include `pipeline_path`, `role_paths`, and `prompt_mode`, return the full canonical first question and stop. Do not infer missing setup inputs from existing project files, previous runs, or conversation context.
 
 1. `pipeline_path`
 2. `role_paths`
@@ -77,7 +77,7 @@ Default assumptions:
 
 ## Canonical First Question
 
-When the user has not yet provided the setup block, ask them to fill this markdown block exactly:
+When the current user message does not include `pipeline_path`, `role_paths`, and `prompt_mode`, ask them to fill this markdown block exactly:
 
 ```md
 Project root: <root folder>
@@ -101,8 +101,7 @@ Question rules:
 - Return the markdown block as-is and ask the user to replace the placeholder paths.
 - If the current workspace should be used, the user may leave `Project root` blank and the skill should resolve it to the current workspace.
 - If the user wants a different target project than the current workspace, ask one short follow-up question for `project_root` after they return the markdown.
-- If they already provided either the pipeline path or some role paths outside the setup block, reuse what they gave inside the canonical markdown block and still show the full block unless the only missing value is a small follow-up after a previous block response.
-- If they omit `Prompt mode` after returning the setup block, ask one short follow-up question for it. Do not use a default prompt mode.
+- If any of `Pipeline`, `Role path`, or `Prompt mode` is missing, show the full canonical block again instead of asking a single-field question.
 - Prompt mode options should be interpreted as:
   - `initialize subagents`: only initialize agents and collect readiness reports: mission, expected inputs, expected outputs, immediate blockers
   - `execute subagents`: make the orchestrator drive agents to perform their roles for the user task or run context, including collecting data and producing the role-specific outputs required by the pipeline
@@ -130,7 +129,7 @@ No canonical git prefix is required for the normal workflow.
 
 ## Workflow
 
-1. If this is a new setup request and the user has not already returned the setup block, send the full canonical markdown block from `Canonical First Question`, including `Prompt mode`.
+1. If the current user message does not include `pipeline_path`, `role_paths`, and `prompt_mode`, send the full canonical markdown block from `Canonical First Question` and stop. Do not run `doctor` or `setup`.
 2. Resolve `project_root` to the current workspace by default, unless the user explicitly wants another project.
 3. Collect `prompt_mode` from the user; if it is missing, ask for it. Do not use a default prompt mode.
 4. Resolve `reasoning_level` to `medium` by default when the user leaves it blank.
