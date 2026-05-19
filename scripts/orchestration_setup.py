@@ -221,10 +221,11 @@ def build_prompt_text(
 1. Do not run a readiness-only initialization pass.
 2. Run the configured agents sequentially, one at a time, according to the shared pipeline and the task or run context I provide.
 3. For each agent, have it read its role file and the shared pipeline, then perform its role for the current workflow.
-4. Give each child agent the current task or run context, the artifact or output requirements from the pipeline, and an explicit instruction to save or return the role-specific output expected by its role and the pipeline.
-5. If a required run context, source, artifact root, or output target is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
-6. Do not start the next agent until the current one has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
-7. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
+4. Before the first child handoff, create any required local artifact root or output directories from the pipeline.
+5. Give each child agent the current task or run context, the artifact or output requirements from the pipeline, and an explicit instruction to save or return the role-specific output expected by its role and the pipeline.
+6. If a required run context, source, artifact root, or output target is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
+7. Do not start the next agent until the current one has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
+8. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
 
     return f"""Use these configured project subagents: {role_names}.
 
@@ -237,7 +238,7 @@ Core rules:
 - If multiple validation roles are required, run them sequentially and wait for each validation role to finish before starting the next one.
 - When a child move advances the pipeline, reread `{pipeline_path}`, detect the latest `HANDOFF: ...` marker when used, and route the next move automatically without waiting for my reminder.
 - Pause only for a terminal condition, a safety-cap hit, or a blocking `USER QUESTION:`. Surface blocking user questions in the main chat immediately, especially from the architect.
-- If a required local artifact or output directory is missing, create it before handoff or before writing. Treat it as a blocker only if directory creation fails.
+- Before the first child handoff, create required local artifact or output directories. Treat directory setup as a blocker only if this preflight creation fails.
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
 - Prompt mode: `{prompt_mode}`.
 
@@ -291,7 +292,7 @@ The role markdown files and the shared pipeline remain at their original source 
 - The standard orchestration prompt lives at `.codex/prompts/subagent-init.md`.
 - In `initialize subagents` prompt mode, use the prompt only to initialize child agents and collect readiness reports.
 - In `execute subagents` prompt mode, use the prompt to make child agents perform their roles for the current task or run context and produce the role-specific outputs required by the pipeline.
-- Missing local artifact or output directories are not blockers. The orchestrator or child agent must create them before handoff or before writing; block only if creation fails.
+- Missing local artifact or output directories are not blockers before preflight. The main orchestrator must create them before the first child handoff; block only if creation fails.
 
 ### Auto-Handoff Mode
 
