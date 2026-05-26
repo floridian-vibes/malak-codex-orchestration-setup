@@ -16,6 +16,9 @@ DEFAULT_SAFETY_CAP = 12
 DEFAULT_REASONING_LEVEL = "medium"
 ALLOWED_REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh")
 ALLOWED_PROMPT_MODES = ("initialize subagents", "execute subagents")
+EXTERNAL_ACCESS_BRIDGE = (
+    "/Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py"
+)
 
 
 @dataclass
@@ -187,6 +190,7 @@ def build_agent_toml(role: RoleSpec, pipeline_path: Path, reasoning_level: str) 
 7. If you need clarification or a decision from the user before continuing or finalizing, include:
    - USER QUESTION: <the exact user-facing question>
    - WHY IT BLOCKS: <why the workflow cannot continue safely without that answer>
+8. In scheduled Codex automation, do not call Slack, GitHub, or other external network integrations directly from the restricted automation runtime. Ask the main orchestrator to use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}`.
 """
 
     return (
@@ -200,12 +204,14 @@ def build_agent_toml(role: RoleSpec, pipeline_path: Path, reasoning_level: str) 
 def build_prompt_text(
     roles: list[RoleSpec],
     pipeline_path: Path,
+    project_root: Path,
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
 ) -> str:
     role_names = ", ".join(role.slug for role in roles)
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
+    bridge_dir = project_root / ".codex" / "external-access-bridge"
     if prompt_mode == "initialize subagents":
         task_block = """Initialization task:
 1. Initialize the configured agents sequentially, one at a time.
@@ -239,6 +245,7 @@ Core rules:
 - When a child move advances the pipeline, reread `{pipeline_path}`, detect the latest `HANDOFF: ...` marker when used, and route the next move automatically without waiting for my reminder.
 - Pause only for a terminal condition, a safety-cap hit, or a blocking `USER QUESTION:`. Surface blocking user questions in the main chat immediately, especially from the architect.
 - Before the first child handoff, create required local artifact or output directories. Treat directory setup as a blocker only if this preflight creation fails.
+- In scheduled Codex automation, do not call Slack or GitHub directly from the restricted automation runtime. Use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}` for Slack/GitHub operations.
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
 - Prompt mode: `{prompt_mode}`.
 
@@ -249,17 +256,30 @@ Configured roles:
 
 Shared pipeline:
 - `{pipeline_path}`
+
+Scheduled automation external access:
+- Bridge helper: `{EXTERNAL_ACCESS_BRIDGE}`
+- Project-local bridge dir: `{bridge_dir}`
+- Setup/preflight from an interactive Codex or Terminal session:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon preflight`
+- Slack delivery from automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+- GitHub API/read access from automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
 """
 
 
 def build_agents_md_block(
     roles: list[RoleSpec],
     pipeline_path: Path,
+    project_root: Path,
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
 ) -> str:
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
+    bridge_dir = project_root / ".codex" / "external-access-bridge"
     return f"""{MANAGED_BEGIN}
 ## Codex Subagent Workflow
 
@@ -293,6 +313,27 @@ The role markdown files and the shared pipeline remain at their original source 
 - In `initialize subagents` prompt mode, use the prompt only to initialize child agents and collect readiness reports.
 - In `execute subagents` prompt mode, use the prompt to make child agents perform their roles for the current task or run context and produce the role-specific outputs required by the pipeline.
 - Missing local artifact or output directories are not blockers before preflight. The main orchestrator must create them before the first child handoff; block only if creation fails.
+
+### Scheduled Automation External Access
+
+Scheduled Codex automation may have restricted DNS or external network access. If this workflow needs Slack delivery, GitHub API reads, GitHub raw file reads, or similar external integration during a scheduled run, the orchestrator must not call those services directly from the automation runtime.
+
+Use the LaunchAgent-backed external access bridge instead:
+
+- Bridge helper: `{EXTERNAL_ACCESS_BRIDGE}`
+- Project-local bridge dir: `{bridge_dir}`
+- Install or refresh the user-session LaunchAgent from an interactive Codex or Terminal session:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
+- Preflight the bridge through the daemon path:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon preflight`
+- Send Slack messages from scheduled automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+- Read GitHub API or allowed GitHub HTTPS URLs from scheduled automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
+
+The bridge must use secrets only from `~/Workspace/command-center/secrets/...` or environment overrides. Never put tokens in role files, pipeline files, `AGENTS.md`, generated prompts, or automation prompts.
+
+If the bridge preflight fails, record the blocker, owner, next action, and the artifact that still needs delivery. Do not silently fall back to direct scheduled-runtime Slack or GitHub calls.
 
 ### Auto-Handoff Mode
 
@@ -368,6 +409,7 @@ def write_setup(
     prompt_text = build_prompt_text(
         roles,
         pipeline_path,
+        project_root,
         reasoning_level,
         max_handoff_turns,
         prompt_mode,
@@ -378,6 +420,7 @@ def write_setup(
     agents_md_block = build_agents_md_block(
         roles,
         pipeline_path,
+        project_root,
         reasoning_level,
         max_handoff_turns,
         prompt_mode,

@@ -1,6 +1,6 @@
 ---
 name: malak-codex-orchestration-setup
-description: "Set up a project-local Codex subagent workflow from existing role markdown files and a shared pipeline file without copying those source files. Use when the user wants Codex to create `.codex/agents/*.toml`, render the main orchestration prompt, and create or update project `AGENTS.md` for a reusable orchestration setup."
+description: "Set up a project-local Codex subagent workflow from existing role markdown files and a shared pipeline file without copying those source files. Use when the user wants Codex to create `.codex/agents/*.toml`, render the main orchestration prompt, create or update project `AGENTS.md`, and configure scheduled automation guidance that routes Slack/GitHub external access through a LaunchAgent bridge instead of the restricted automation runtime."
 ---
 
 # Malak Codex Orchestration Setup
@@ -17,6 +17,7 @@ This skill is setup-oriented:
 - create project-local Codex agent definitions that point at those original files;
 - create or update project `AGENTS.md` with orchestration guidance Codex can read automatically;
 - render the orchestration prompt the user can paste into the main Codex chat;
+- generate scheduled Codex automation guidance that sends Slack/GitHub external calls through a user-session LaunchAgent bridge when the scheduled runtime has restricted DNS or network access;
 - configure the main orchestrator for automatic handoffs through the main thread by default;
 - keep the main orchestrator in a coordination-only role instead of letting it do agent work itself;
 - force all child agents to run strictly sequentially, including validation roles;
@@ -26,17 +27,35 @@ This skill is setup-oriented:
 ## External Credentials And Auth Policy
 
 - This skill is local-only and normally requires no external service authorization.
-- If a future version of this skill ever needs external auth, verify auth readiness before modifying the target project.
+- The generated orchestration setup may need external Slack or GitHub access at runtime. Scheduled Codex automation must not call Slack or GitHub directly from the restricted automation runtime when DNS/network access is unreliable.
+- Use the LaunchAgent-backed external access bridge for scheduled automation Slack/GitHub calls:
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge via-daemon <command>`
+- Use a project-local `--bridge-dir` for scheduled automations so the restricted automation runtime can write daemon requests under its own project workspace.
+- The bridge supports bounded external operations only: `preflight`, `slack-post`, and `github-get`. Do not use it as a generic shell runner.
+- For Slack delivery, the default bot-token env file is:
+  `~/Workspace/command-center/secrets/slack-pulse-ai-bot.env`
+- Override Slack credentials with `MALAK_CODEX_ORCH_SLACK_ENV` or the bridge `--slack-env` option when needed.
+- For GitHub API access, use `GITHUB_TOKEN` or `GH_TOKEN` from process env or:
+  `~/Workspace/command-center/secrets/malak-codex-orchestration-setup/github.env`
+- Override GitHub credentials with `MALAK_CODEX_ORCH_GITHUB_ENV` or the bridge `--github-env` option when needed.
 - Never store OAuth credentials, API keys, tokens, or other secrets inside `~/Workspace/My-skills`, `~/.codex/skills`, or any Git-tracked skill repository.
-- Store any future secrets outside the skill repository under `~/Workspace/command-center/secrets/<skill-slug>/`.
+- Store secrets outside the skill repository under `~/Workspace/command-center/secrets/...`.
+- Non-sensitive bridge state lives under:
+  `~/Workspace/command-center/malak-codex-orchestration-setup/external-bridge/`
 
 ## Canonical Commands
 
 - Canonical helper prefix:
   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py`
+- Canonical external access bridge prefix:
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py`
 - Canonical helper invocations:
   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py doctor --stdin`
   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py setup --stdin`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge install-launchagent`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon preflight`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon slack-post --channel C123 --text "message"`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon github-get --api-path /repos/owner/repo --output /absolute/path/output.json`
 - Canonical plugin or tool actions:
   `functions.exec_command`
   `functions.write_stdin`
@@ -124,6 +143,7 @@ Question rules:
 Approve forever once when the platform asks:
 
 - `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py`
+- `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py`
 
 No canonical git prefix is required for the normal workflow.
 
@@ -170,9 +190,56 @@ No canonical git prefix is required for the normal workflow.
    - write the selected max handoff cap into the generated orchestration docs;
    - write the selected prompt mode into the generated orchestration docs;
    - keep role and pipeline source files at their original paths;
+   - embed scheduled automation external access rules that require Slack/GitHub calls to use the LaunchAgent-backed external access bridge instead of direct scheduled-runtime network calls;
    - return the rendered orchestration prompt and the written file paths.
-13. Return the orchestration prompt in the final answer, plus the key file paths that were written.
-14. On reruns for an already configured project, render the same orchestration prompt from the current inputs instead of switching to a shortened, delta-only, or repair-only prompt.
+13. If the user is creating or repairing a scheduled automation that will post to Slack, read from GitHub, or otherwise needs external Slack/GitHub access, install or refresh the bridge from the interactive run:
+   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge install-launchagent`
+14. Then preflight the scheduled-runtime path through the daemon:
+   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge via-daemon preflight`
+15. Do not put Slack/GitHub tokens in the automation prompt. The automation prompt should call the bridge with `via-daemon` for Slack/GitHub operations and read secrets from `~/Workspace/command-center/secrets/...`.
+16. Return the orchestration prompt in the final answer, plus the key file paths that were written.
+17. On reruns for an already configured project, render the same orchestration prompt from the current inputs instead of switching to a shortened, delta-only, or repair-only prompt.
+
+## Scheduled Automation External Access Bridge
+
+Use this section when the configured orchestration workflow will be run by Codex scheduled automation and may need Slack or GitHub access.
+
+Problem:
+
+- normal Codex chat may have connector/network access that scheduled automation does not have;
+- scheduled automation can fail with DNS or external network errors;
+- Slack/GitHub delivery must still happen from the user's machine without sending messages from the user's Slack identity.
+
+Required architecture:
+
+1. Scheduled automation remains the orchestration and analysis layer.
+2. Scheduled automation writes local artifacts and decides what external call is needed.
+3. Scheduled automation calls the bridge helper with `via-daemon`.
+4. The bridge writes a request under the project-local `--bridge-dir`.
+5. The user-session LaunchAgent daemon performs the Slack/GitHub HTTPS request outside the restricted automation runtime.
+6. The bridge returns a JSON result to the scheduled automation.
+7. The automation records the Slack timestamp, GitHub output path, or delivery blocker in the final run output.
+
+Do not use the bridge for arbitrary shell execution. It only exposes bounded subcommands:
+
+- `preflight`
+- `slack-post`
+- `github-get`
+
+For Slack:
+
+- use `slack-post`;
+- send only through bot token credentials;
+- never use the Codex Slack connector from scheduled automation for bot delivery;
+- never post as the user's Slack identity.
+
+For GitHub:
+
+- use `github-get` for GitHub API paths or allowed GitHub HTTPS URLs;
+- write large responses to an output file with `--output`;
+- do not print tokens or embed them in URLs.
+
+If bridge preflight fails during automation setup, report the blocker and do not create a misleading automation that will later fail silently.
 
 ## Auto-Handoff Mode
 
@@ -195,6 +262,7 @@ Required behavior:
 - If the user does not specify a limit, use a default safety cap of `12` handoff turns, report when it is reached, and ask whether to continue.
 - If the user configures a project-specific max handoff cap during setup, generated project docs should use that configured value as the workflow default until explicitly overridden.
 - The generated `AGENTS.md` and `.codex/prompts/subagent-init.md` should both carry these rules so the behavior survives reuse across future tasks.
+- The generated `AGENTS.md` and `.codex/prompts/subagent-init.md` should also carry scheduled automation external access rules so Slack/GitHub calls route through the LaunchAgent bridge when needed.
 - The generated prompt should state this compactly so the orchestration intent is clear without unnecessary extra text.
 - In `initialize subagents` prompt mode, the generated prompt should initialize configured child agents and collect readiness reports.
 - In `execute subagents` prompt mode, the generated prompt must explicitly forbid readiness-only initialization and require child agents to perform their roles for the current task or run context.
