@@ -4,17 +4,17 @@ This skill also installs reusable project guidance for scheduled Codex automatio
 When the scheduled runtime needs Slack or GitHub access, route those calls through:
 
 ```bash
-python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon --require-running-daemon <command>
+python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge request <command>
 ```
 
 Set up the user-session bridge once from an interactive run:
 
 ```bash
 python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge install-launchagent
-python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon preflight
+python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge request preflight
 ```
 
-Do not run `install-launchagent` from scheduled automation. Scheduled automation should use `via-daemon --require-running-daemon` and record a blocker if the daemon is not already running.
+Do not run `install-launchagent` from scheduled automation. Scheduled automation should use `request <command>`. The LaunchAgent is demand-start only: `RunAtLoad = false`, `KeepAlive = false`, and no work happens while the Codex automation is paused.
 
 Prompt to answer the skill's invitation:
 ```

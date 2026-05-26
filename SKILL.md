@@ -29,9 +29,9 @@ This skill is setup-oriented:
 - This skill is local-only and normally requires no external service authorization.
 - The generated orchestration setup may need external Slack or GitHub access at runtime. Scheduled Codex automation must not call Slack or GitHub directly from the restricted automation runtime when DNS/network access is unreliable.
 - Use the LaunchAgent-backed external access bridge for scheduled automation Slack/GitHub calls:
-  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge via-daemon --require-running-daemon <command>`
-- Use a project-local `--bridge-dir` for scheduled automations so the restricted automation runtime can write daemon requests under its own project workspace.
-- Scheduled automation must never call `install-launchagent` and must never let `via-daemon` bootstrap LaunchAgent. Install or refresh the LaunchAgent only from an interactive user session.
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge request <command>`
+- Use a project-local `--bridge-dir` for scheduled automations so the restricted automation runtime can write request and response files under its own project workspace.
+- Scheduled automation must never call `install-launchagent`. Install or refresh the demand-start LaunchAgent only from an interactive user session.
 - The bridge supports bounded external operations only: `preflight`, `slack-post`, and `github-get`. Do not use it as a generic shell runner.
 - For Slack delivery, the default bot-token env file is:
   `~/Workspace/command-center/secrets/slack-pulse-ai-bot.env`
@@ -55,9 +55,9 @@ This skill is setup-oriented:
   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py doctor --stdin`
   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py setup --stdin`
   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge install-launchagent`
-  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon preflight`
-  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon --require-running-daemon slack-post --channel C123 --text "message"`
-  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon --require-running-daemon github-get --api-path /repos/owner/repo --output /absolute/path/output.json`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge request preflight`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge request slack-post --channel C123 --text "message"`
+  `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge request github-get --api-path /repos/owner/repo --output /absolute/path/output.json`
 - Canonical plugin or tool actions:
   `functions.exec_command`
   `functions.write_stdin`
@@ -196,9 +196,9 @@ No canonical git prefix is required for the normal workflow.
    - return the rendered orchestration prompt and the written file paths.
 13. If the user is creating or repairing a scheduled automation that will post to Slack, read from GitHub, or otherwise needs external Slack/GitHub access, install or refresh the bridge from the interactive run:
    `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge install-launchagent`
-14. Then preflight the scheduled-runtime path through the daemon:
-   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge via-daemon preflight`
-15. Do not put Slack/GitHub tokens in the automation prompt. The automation prompt should call the bridge with `via-daemon --require-running-daemon` for Slack/GitHub operations and read secrets from `~/Workspace/command-center/secrets/...`.
+14. Then preflight the scheduled-runtime request path:
+   `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge request preflight`
+15. Do not put Slack/GitHub tokens in the automation prompt. The automation prompt should call the bridge with `request` for Slack/GitHub operations and read secrets from `~/Workspace/command-center/secrets/...`.
 16. Return the orchestration prompt in the final answer, plus the key file paths that were written.
 17. On reruns for an already configured project, render the same orchestration prompt from the current inputs instead of switching to a shortened, delta-only, or repair-only prompt.
 
@@ -216,13 +216,16 @@ Required architecture:
 
 1. Scheduled automation remains the orchestration and analysis layer.
 2. Scheduled automation writes local artifacts and decides what external call is needed.
-3. Scheduled automation calls the bridge helper with `via-daemon --require-running-daemon`.
+3. Scheduled automation calls the bridge helper with `request <command>`.
 4. The bridge writes a request under the project-local `--bridge-dir`.
-5. The user-session LaunchAgent daemon performs the Slack/GitHub HTTPS request outside the restricted automation runtime.
-6. The bridge returns a JSON result to the scheduled automation.
-7. The automation records the Slack timestamp, GitHub output path, or delivery blocker in the final run output.
+5. The bridge kickstarts the already-installed LaunchAgent.
+6. The LaunchAgent runs once, processes pending request JSON files, writes responses, and exits.
+7. The bridge returns a JSON result to the scheduled automation.
+8. The automation records the Slack timestamp, GitHub output path, or delivery blocker in the final run output.
 
-Scheduled automation must not run `install-launchagent`, `start-daemon`, or fallback LaunchAgent bootstrap. If the daemon is not already running, the scheduled run must fail with a clear blocker that says the bridge needs interactive setup.
+The LaunchAgent is not a scheduler. It must be installed with `RunAtLoad = false` and `KeepAlive = false`; it only runs when Codex scheduled automation creates a request and kickstarts it. If the Codex automation is paused, no request is created, the LaunchAgent is not kickstarted, and no Slack/GitHub work happens.
+
+Scheduled automation must not run `install-launchagent`, `start-daemon`, or any long-running daemon bootstrap. If the LaunchAgent is not already installed or loaded, the scheduled run must fail with a clear blocker that says the bridge needs interactive setup.
 
 Do not use the bridge for arbitrary shell execution. It only exposes bounded subcommands:
 

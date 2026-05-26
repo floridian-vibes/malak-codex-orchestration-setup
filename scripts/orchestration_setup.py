@@ -262,11 +262,11 @@ Scheduled automation external access:
 - Project-local bridge dir: `{bridge_dir}`
 - Setup/preflight from an interactive Codex or Terminal session:
   `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon preflight`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request preflight`
 - Slack delivery from automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
 - GitHub API/read access from automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request github-get --api-path /repos/<owner>/<repo> --output <path>`
 """
 
 
@@ -324,16 +324,16 @@ Use the LaunchAgent-backed external access bridge instead:
 - Project-local bridge dir: `{bridge_dir}`
 - Install or refresh the user-session LaunchAgent from an interactive Codex or Terminal session:
   `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
-- Preflight the bridge through the daemon path:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon preflight`
+- Preflight the request bridge through LaunchAgent:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request preflight`
 - Send Slack messages from scheduled automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
 - Read GitHub API or allowed GitHub HTTPS URLs from scheduled automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request github-get --api-path /repos/<owner>/<repo> --output <path>`
 
 The bridge must use secrets only from `~/Workspace/command-center/secrets/...` or environment overrides. Never put tokens in role files, pipeline files, `AGENTS.md`, generated prompts, or automation prompts.
 
-The scheduled automation run must never call `install-launchagent` and must never allow `via-daemon` to bootstrap LaunchAgent. Use `via-daemon --require-running-daemon` in scheduled automation. If the daemon is not already running, record a blocker with owner and next action.
+The scheduled automation run must never call `install-launchagent`. `install-launchagent` is setup-only and registers a demand-start LaunchAgent with `RunAtLoad = false` and `KeepAlive = false`. Scheduled automation uses `request ...`: the helper writes a request JSON, kickstarts the already-installed LaunchAgent, waits for a response, and then the LaunchAgent exits. If the LaunchAgent is not already installed or loaded, record a blocker with owner and next action.
 
 If the bridge preflight fails, record the blocker, owner, next action, and the artifact that still needs delivery. Do not silently fall back to direct scheduled-runtime Slack or GitHub calls.
 

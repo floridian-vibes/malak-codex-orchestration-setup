@@ -30,7 +30,7 @@ STATE_ROOT = Path(
 REQUESTS_DIR = STATE_ROOT / "requests"
 RESPONSES_DIR = STATE_ROOT / "responses"
 LOG_DIR = STATE_ROOT / "logs"
-PID_PATH = STATE_ROOT / "daemon.pid"
+PID_PATH = STATE_ROOT / "runner.pid"
 DEFAULT_SLACK_ENV = Path(
     os.environ.get(
         "MALAK_CODEX_ORCH_SLACK_ENV",
@@ -52,7 +52,7 @@ def configure_state_root(path: Path) -> None:
     REQUESTS_DIR = STATE_ROOT / "requests"
     RESPONSES_DIR = STATE_ROOT / "responses"
     LOG_DIR = STATE_ROOT / "logs"
-    PID_PATH = STATE_ROOT / "daemon.pid"
+    PID_PATH = STATE_ROOT / "runner.pid"
 
 
 def helper_python() -> str:
@@ -159,9 +159,15 @@ def launchagent_payload() -> dict:
         "ProgramArguments": [
             helper_python(),
             str(script_path),
-            "daemon",
+            "--bridge-dir",
+            str(STATE_ROOT),
+            "--slack-env",
+            str(DEFAULT_SLACK_ENV),
+            "--github-env",
+            str(DEFAULT_GITHUB_ENV),
+            "run-requests",
         ],
-        "RunAtLoad": True,
+        "RunAtLoad": False,
         "KeepAlive": False,
         "EnvironmentVariables": {
             "MALAK_CODEX_ORCH_BRIDGE_DIR": str(STATE_ROOT),
@@ -173,60 +179,87 @@ def launchagent_payload() -> dict:
     }
 
 
-def ensure_launchagent_loaded() -> dict:
+def launchagent_is_loaded() -> bool:
+    try:
+        run_process(["launchctl", "print", launchctl_service_name()], timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def bootout_launchagent() -> bool:
+    try:
+        run_process(["launchctl", "bootout", launchctl_service_name()], timeout=10)
+        return True
+    except Exception:
+        return False
+
+
+def bootstrap_launchagent(plist_path: Path) -> None:
+    run_process(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)], timeout=20)
+
+
+def kickstart_launchagent() -> None:
+    run_process(["launchctl", "kickstart", "-k", launchctl_service_name()], timeout=20)
+
+
+def ensure_launchagent_installed() -> dict:
     plist_path = launchagent_plist_path()
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     payload = launchagent_payload()
     existing = None
+    changed = False
     if plist_path.exists():
         try:
             existing = plistlib.loads(plist_path.read_bytes())
         except Exception:
             existing = None
     if existing != payload:
+        if launchagent_is_loaded():
+            bootout_launchagent()
         plist_path.write_bytes(plistlib.dumps(payload, sort_keys=False))
+        changed = True
 
-    service = launchctl_service_name()
-    loaded = False
-    try:
-        run_process(["launchctl", "print", service], timeout=10)
-        loaded = True
-    except Exception:
-        loaded = False
-    if not loaded:
-        run_process(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)], timeout=20)
-    run_process(["launchctl", "kickstart", "-k", service], timeout=20)
+    if not launchagent_is_loaded():
+        bootstrap_launchagent(plist_path)
+
     return {
         "label": launchagent_label(),
         "plist": str(plist_path),
-        "daemon_root": str(STATE_ROOT),
+        "bridge_dir": str(STATE_ROOT),
         "loaded": True,
+        "run_at_load": False,
+        "keep_alive": False,
+        "changed": changed,
     }
 
 
-def submit_daemon_request(
+def submit_launchagent_request(
     argv: list[str],
     timeout: float | None = None,
     *,
     slack_env: Path | None = None,
     github_env: Path | None = None,
-    require_running_daemon: bool = False,
 ) -> dict:
     if not argv:
         raise RuntimeError("No bridge command provided")
-    if argv[0] in {"daemon", "via-daemon", "install-launchagent", "start-daemon", "stop-daemon"}:
-        raise RuntimeError(f"Refusing to run {argv[0]} through the daemon")
-    status = daemon_status()
-    launchagent = None
-    if not status["running"]:
-        if require_running_daemon:
-            raise RuntimeError(
-                "External access daemon is not running. "
-                "Do not bootstrap LaunchAgent from scheduled automation; "
-                "run install-launchagent or start-daemon once from an interactive user session, "
-                "then retry the automation."
-            )
-        launchagent = ensure_launchagent_loaded()
+    if argv[0] in {
+        "daemon",
+        "run-requests",
+        "request",
+        "via-daemon",
+        "install-launchagent",
+        "start-daemon",
+        "stop-daemon",
+        "stop-runner",
+    }:
+        raise RuntimeError(f"Refusing to run {argv[0]} through the LaunchAgent bridge")
+    if not launchagent_is_loaded():
+        raise RuntimeError(
+            "External access LaunchAgent is not installed or loaded. "
+            "Do not install or bootstrap it from scheduled automation; "
+            "run install-launchagent once from an interactive user session, then retry."
+        )
     request_id = uuid.uuid4().hex
     timeout = timeout or 120.0
     request_path = REQUESTS_DIR / f"{request_id}.json"
@@ -244,21 +277,25 @@ def submit_daemon_request(
         },
     }
     write_json_atomic(request_path, request)
+    kickstart_launchagent()
 
     deadline = time.monotonic() + timeout + 30.0
     while time.monotonic() <= deadline:
         if response_path.exists():
             response = read_json(response_path)
-            response["daemon_status"] = daemon_status()
-            if launchagent:
-                response["launchagent"] = launchagent
+            response["launchagent"] = {
+                "label": launchagent_label(),
+                "bridge_dir": str(STATE_ROOT),
+                "run_at_load": False,
+                "keep_alive": False,
+            }
             return response
         time.sleep(0.5)
-    raise RuntimeError(f"Timed out waiting for external access daemon response for request {request_id}")
+    raise RuntimeError(f"Timed out waiting for external access LaunchAgent response for request {request_id}")
 
 
 def cmd_install_launchagent(_args: argparse.Namespace) -> int:
-    result = ensure_launchagent_loaded()
+    result = ensure_launchagent_installed()
     print(json.dumps({"ok": True, **result}, ensure_ascii=False))
     return 0
 
@@ -321,15 +358,18 @@ def cmd_stop_daemon(_args: argparse.Namespace) -> int:
 
 
 def cmd_via_daemon(args: argparse.Namespace) -> int:
+    return cmd_request(args)
+
+
+def cmd_request(args: argparse.Namespace) -> int:
     argv = list(args.argv)
     if argv and argv[0] == "--":
         argv = argv[1:]
-    response = submit_daemon_request(
+    response = submit_launchagent_request(
         argv,
         timeout=args.timeout,
         slack_env=args.slack_env,
         github_env=args.github_env,
-        require_running_daemon=args.require_running_daemon,
     )
     stdout = response.get("stdout") or ""
     stderr = response.get("stderr") or ""
@@ -417,6 +457,84 @@ def cmd_daemon(_args: argparse.Namespace) -> int:
                 PID_PATH.unlink()
         except Exception:
             pass
+
+
+def cmd_run_requests(_args: argparse.Namespace) -> int:
+    REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
+    RESPONSES_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    PID_PATH.write_text(str(os.getpid()), encoding="utf-8")
+    script_path = Path(__file__).resolve()
+    processed = 0
+    try:
+        for request_path in sorted(REQUESTS_DIR.glob("*.json")):
+            processing_path = request_path.with_suffix(".processing")
+            try:
+                request_path.rename(processing_path)
+            except OSError:
+                continue
+            response = {
+                "id": processing_path.stem,
+                "ok": False,
+                "returncode": 1,
+                "stdout": "",
+                "stderr": "",
+            }
+            try:
+                request = read_json(processing_path)
+                argv = request.get("argv") or []
+                timeout = float(request.get("timeout") or 120.0)
+                child_env = os.environ.copy()
+                child_env.update(request.get("env") or {})
+                proc = subprocess.run(
+                    [helper_python(), str(script_path), *argv],
+                    cwd=request.get("cwd") or str(Path.home()),
+                    text=True,
+                    capture_output=True,
+                    timeout=timeout,
+                    env=child_env,
+                )
+                response.update(
+                    {
+                        "id": request.get("id", processing_path.stem),
+                        "ok": proc.returncode == 0,
+                        "returncode": proc.returncode,
+                        "stdout": proc.stdout.strip(),
+                        "stderr": proc.stderr.strip(),
+                        "argv": argv,
+                        "finished_at": datetime.now().isoformat(),
+                    }
+                )
+                if response["stdout"]:
+                    try:
+                        response["parsed_stdout"] = json.loads(response["stdout"])
+                    except Exception:
+                        pass
+            except Exception as exc:
+                response.update(
+                    {
+                        "ok": False,
+                        "returncode": 1,
+                        "stderr": str(exc),
+                        "finished_at": datetime.now().isoformat(),
+                    }
+                )
+            finally:
+                response_id = response.get("id", processing_path.stem)
+                write_json_atomic(RESPONSES_DIR / f"{response_id}.json", response)
+                processed += 1
+                try:
+                    processing_path.unlink()
+                except FileNotFoundError:
+                    pass
+    finally:
+        try:
+            if PID_PATH.exists() and PID_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
+                PID_PATH.unlink()
+        except Exception:
+            pass
+    print(json.dumps({"ok": True, "processed": processed, "bridge_dir": str(STATE_ROOT)}, ensure_ascii=False))
+    return 0
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
@@ -596,21 +714,13 @@ def build_parser() -> argparse.ArgumentParser:
     install_agent = sub.add_parser("install-launchagent")
     install_agent.set_defaults(func=cmd_install_launchagent)
 
-    start_daemon = sub.add_parser("start-daemon")
-    start_daemon.add_argument("--restart", action="store_true")
-    start_daemon.set_defaults(func=cmd_start_daemon)
+    request = sub.add_parser("request")
+    request.add_argument("--timeout", type=float)
+    request.add_argument("argv", nargs=argparse.REMAINDER)
+    request.set_defaults(func=cmd_request)
 
-    stop_daemon = sub.add_parser("stop-daemon")
-    stop_daemon.set_defaults(func=cmd_stop_daemon)
-
-    via_daemon = sub.add_parser("via-daemon")
-    via_daemon.add_argument("--timeout", type=float)
-    via_daemon.add_argument("--require-running-daemon", action="store_true")
-    via_daemon.add_argument("argv", nargs=argparse.REMAINDER)
-    via_daemon.set_defaults(func=cmd_via_daemon)
-
-    daemon = sub.add_parser("daemon")
-    daemon.set_defaults(func=cmd_daemon)
+    run_requests = sub.add_parser("run-requests")
+    run_requests.set_defaults(func=cmd_run_requests)
 
     slack_post = sub.add_parser("slack-post")
     slack_post.add_argument("--channel", required=True)
