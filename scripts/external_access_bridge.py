@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import plistlib
@@ -19,7 +20,7 @@ from pathlib import Path
 
 
 SKILL_SLUG = "malak-codex-orchestration-setup"
-LAUNCHAGENT_LABEL = "com.malak.codex-orchestration.external-access"
+LAUNCHAGENT_LABEL_BASE = "com.malak.codex-orchestration.external-access"
 STATE_ROOT = Path(
     os.environ.get(
         "MALAK_CODEX_ORCH_BRIDGE_DIR",
@@ -56,6 +57,11 @@ def configure_state_root(path: Path) -> None:
 
 def helper_python() -> str:
     return shutil.which("python3") or sys.executable or "/usr/bin/python3"
+
+
+def launchagent_label() -> str:
+    digest = hashlib.sha256(str(STATE_ROOT).encode("utf-8")).hexdigest()[:10]
+    return f"{LAUNCHAGENT_LABEL_BASE}.{digest}"
 
 
 def write_json_atomic(path: Path, payload: dict) -> None:
@@ -120,11 +126,11 @@ def http_request_json(
 
 
 def launchagent_plist_path() -> Path:
-    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHAGENT_LABEL}.plist"
+    return Path.home() / "Library" / "LaunchAgents" / f"{launchagent_label()}.plist"
 
 
 def launchctl_service_name() -> str:
-    return f"gui/{os.getuid()}/{LAUNCHAGENT_LABEL}"
+    return f"gui/{os.getuid()}/{launchagent_label()}"
 
 
 def pid_is_running(pid: int) -> bool:
@@ -149,7 +155,7 @@ def launchagent_payload() -> dict:
     script_path = Path(__file__).resolve()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     return {
-        "Label": LAUNCHAGENT_LABEL,
+        "Label": launchagent_label(),
         "ProgramArguments": [
             helper_python(),
             str(script_path),
@@ -191,7 +197,7 @@ def ensure_launchagent_loaded() -> dict:
         run_process(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(plist_path)], timeout=20)
     run_process(["launchctl", "kickstart", "-k", service], timeout=20)
     return {
-        "label": LAUNCHAGENT_LABEL,
+        "label": launchagent_label(),
         "plist": str(plist_path),
         "daemon_root": str(STATE_ROOT),
         "loaded": True,
@@ -204,6 +210,7 @@ def submit_daemon_request(
     *,
     slack_env: Path | None = None,
     github_env: Path | None = None,
+    require_running_daemon: bool = False,
 ) -> dict:
     if not argv:
         raise RuntimeError("No bridge command provided")
@@ -212,6 +219,13 @@ def submit_daemon_request(
     status = daemon_status()
     launchagent = None
     if not status["running"]:
+        if require_running_daemon:
+            raise RuntimeError(
+                "External access daemon is not running. "
+                "Do not bootstrap LaunchAgent from scheduled automation; "
+                "run install-launchagent or start-daemon once from an interactive user session, "
+                "then retry the automation."
+            )
         launchagent = ensure_launchagent_loaded()
     request_id = uuid.uuid4().hex
     timeout = timeout or 120.0
@@ -315,6 +329,7 @@ def cmd_via_daemon(args: argparse.Namespace) -> int:
         timeout=args.timeout,
         slack_env=args.slack_env,
         github_env=args.github_env,
+        require_running_daemon=args.require_running_daemon,
     )
     stdout = response.get("stdout") or ""
     stderr = response.get("stderr") or ""
@@ -590,6 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     via_daemon = sub.add_parser("via-daemon")
     via_daemon.add_argument("--timeout", type=float)
+    via_daemon.add_argument("--require-running-daemon", action="store_true")
     via_daemon.add_argument("argv", nargs=argparse.REMAINDER)
     via_daemon.set_defaults(func=cmd_via_daemon)
 

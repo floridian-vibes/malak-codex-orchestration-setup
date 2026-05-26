@@ -4,7 +4,7 @@ This skill also installs reusable project guidance for scheduled Codex automatio
 When the scheduled runtime needs Slack or GitHub access, route those calls through:
 
 ```bash
-python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon <command>
+python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon --require-running-daemon <command>
 ```
 
 Set up the user-session bridge once from an interactive run:
@@ -13,6 +13,8 @@ Set up the user-session bridge once from an interactive run:
 python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge install-launchagent
 python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir /absolute/project/.codex/external-access-bridge via-daemon preflight
 ```
+
+Do not run `install-launchagent` from scheduled automation. Scheduled automation should use `via-daemon --require-running-daemon` and record a blocker if the daemon is not already running.
 
 Prompt to answer the skill's invitation:
 ```

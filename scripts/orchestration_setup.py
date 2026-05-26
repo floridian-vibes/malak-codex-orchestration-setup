@@ -264,9 +264,9 @@ Scheduled automation external access:
   `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
   `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon preflight`
 - Slack delivery from automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
 - GitHub API/read access from automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
 """
 
 
@@ -327,11 +327,13 @@ Use the LaunchAgent-backed external access bridge instead:
 - Preflight the bridge through the daemon path:
   `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon preflight`
 - Send Slack messages from scheduled automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
 - Read GitHub API or allowed GitHub HTTPS URLs from scheduled automation:
-  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} via-daemon --require-running-daemon github-get --api-path /repos/<owner>/<repo> --output <path>`
 
 The bridge must use secrets only from `~/Workspace/command-center/secrets/...` or environment overrides. Never put tokens in role files, pipeline files, `AGENTS.md`, generated prompts, or automation prompts.
+
+The scheduled automation run must never call `install-launchagent` and must never allow `via-daemon` to bootstrap LaunchAgent. Use `via-daemon --require-running-daemon` in scheduled automation. If the daemon is not already running, record a blocker with owner and next action.
 
 If the bridge preflight fails, record the blocker, owner, next action, and the artifact that still needs delivery. Do not silently fall back to direct scheduled-runtime Slack or GitHub calls.
 
