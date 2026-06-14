@@ -24,6 +24,7 @@ This skill is setup-oriented:
 - force user-facing questions from subagents or durable role threads, especially the architect, to be relayed in the main chat;
 - when using durable thread mode, title every role thread with the exact prefix `agent:` using the form `agent:<role_id>`, where `role_id` is the explicit role identity;
 - when using durable thread mode, reuse existing project role threads by `role_id` from `.codex/orchestration/role-threads.json`; do not use `role_path` as identity because multiple distinct roles can share the same role file;
+- when using durable thread mode, use compact delta-only handoffs after initialization so role threads keep stable context in their own memory instead of receiving the full bootstrap packet on every move;
 - avoid copying role or pipeline files into `.codex` or elsewhere in the project.
 
 ## External Credentials And Auth Policy
@@ -236,6 +237,7 @@ No canonical git prefix is required for the normal workflow.
    - create `.codex/prompts/thread-orchestration.md`;
    - create one `.codex/prompts/thread-roles/<role_id>.md` initial prompt per new role that does not already have a registered thread;
    - create or update `AGENTS.md` using a managed durable-thread block;
+   - embed compact handoff rules so initialized durable role threads receive only delta context on later moves;
    - return `reused_role_threads` for existing role IDs;
    - return `thread_creation_requests` only for missing role IDs, each with `role_id`, `thread_title`, `prompt_path`, and `prompt`.
 15. In durable thread mode, create one Codex app thread per `thread_creation_requests` entry by calling `codex_app.create_thread` with:
@@ -283,7 +285,7 @@ No canonical git prefix is required for the normal workflow.
    `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py --bridge-dir <project-root>/.codex/external-access-bridge request preflight`
 23. Do not put Slack/GitHub tokens in the automation prompt. The automation prompt should call the bridge with `request` for Slack/GitHub operations and read secrets from `~/Workspace/command-center/secrets/...`.
 24. Return the orchestration prompt in the final answer, plus the key file paths that were written.
-25. On reruns for an already configured project, render the same orchestration prompt from the current inputs instead of switching to a shortened, delta-only, or repair-only prompt.
+25. On reruns for an already configured project, render the same orchestration setup prompt shape from the current inputs instead of switching the setup output to a shortened or repair-only form. This does not override the durable-thread runtime rule that later role handoffs are compact delta-only.
 
 ## Scheduled Automation External Access Bridge
 
@@ -360,6 +362,11 @@ Required behavior:
 - Missing local artifact or output directories are not blockers before preflight. Generated docs must tell the main orchestrator to create them before the first child handoff, and to block only if creation fails.
 - In durable thread mode, generated docs must state that each created role thread title must start with `agent:` and should be exactly `agent:<role_id>`, where `role_id` is the explicit role identity.
 - In durable thread mode, generated docs must state that reuse is keyed by `project_root + role_id`, not by `role_path`.
+- In durable thread mode, generated docs must state that handoff context mode is `compact` after initialization:
+  - send full project/root role/pipeline context only during role thread bootstrap, repair, or explicit rebootstrap;
+  - for ordinary workflow moves, send only delta context: triggering user request or feedback, changed task/status, relevant files/commits/artifacts, specific expected output, and new constraints;
+  - do not repeat project root, role source path, shared pipeline path, stable operating rules, or generic role responsibilities unless changed or requested by the role thread;
+  - if a role thread reports missing context, resend only the missing piece.
 
 ## User Question Relay
 

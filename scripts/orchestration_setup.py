@@ -375,12 +375,14 @@ def build_prompt_text(
         thread_task_block = """Execution task:
 1. Do not run a readiness-only initialization pass.
 2. Use the configured durable role threads sequentially, one at a time, according to the shared pipeline and the task or run context I provide.
-3. For each role, send the current move to the matching existing thread from the pipeline registry under `.codex/orchestration/pipelines/<pipeline_id>/threads.json`; do not spawn Codex subagents for these configured roles.
+3. For each role, send a compact delta-only handoff to the matching existing thread from the pipeline registry under `.codex/orchestration/pipelines/<pipeline_id>/threads.json`; do not spawn Codex subagents for these configured roles.
 4. Before the first role-thread handoff, create any required local artifact root or output directories from the pipeline.
-5. Give each role thread the current task or run context, the artifact or output requirements from the pipeline, and an explicit instruction to save or return the role-specific output expected by its role and the pipeline.
-6. If a required run context, source, artifact root, output target, or role thread id is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
-7. Do not message the next role thread until the current role thread has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
-8. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
+5. Do not resend stable bootstrap context that already lives in the durable role thread: project root, role source path, shared pipeline path, standing operating rules, or the role's general responsibilities.
+6. Include only the new delta: triggering user request or feedback, changed task/status, relevant files/commits/artifacts, the specific expected output for this move, and any new constraints.
+7. If a role thread says it is missing context, resend only the missing piece instead of sending the full bootstrap packet.
+8. If a required run context, source, artifact root, output target, or role thread id is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
+9. Do not message the next role thread until the current role thread has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
+10. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
 
     if orchestration_backend == "threads":
         registry_path = pipeline_registry_path(project_root, pipeline_id)
@@ -395,6 +397,8 @@ Core rules:
 - Do not spawn Codex subagents for the configured roles. Use the existing durable role threads from `{registry_path}`.
 - Reuse project-level durable role threads from `{role_registry}` by `role_id`. If a role is already registered there, route to that existing thread instead of creating a duplicate.
 - Every durable role thread created or repaired for this workflow must have a title beginning with `agent:` and should use the exact title `agent:<role_id>`, where `<role_id>` is the configured role identity. Example: `agent:backend-developer`.
+- Handoff context mode: `compact`. After a role thread has been initialized, do not send full bootstrap context again unless repairing/rebootstrapping that role thread.
+- Compact handoffs must be delta-only. Do not include project root, role source path, shared pipeline path, stable operating rules, or generic role responsibilities unless they changed or the role thread explicitly asks for them.
 - Default mode: if I give a task, pass it unchanged to the role thread that should act next under `{pipeline_path}`.
 - Exception: only treat my message as an orchestration request when I explicitly ask about routing, handoff, pause/resume, limits, role choice, or fixing the workflow.
 - All handoffs go through the main orchestrator thread; role threads must not message or continue each other directly.
@@ -504,17 +508,19 @@ Project role registry:
 - `{shared_registry_path}`
 
 Operating rules:
-1. Before every move, read the role file and shared pipeline from their original absolute paths.
-2. Work only as the `{role.role_id}` role. Do not take over orchestration or another role's responsibilities.
-3. Keep continuity inside this durable thread across future messages from the main orchestrator.
-4. Return concise handoff updates to the main orchestrator, including status, summary, outputs for the next stage, open questions, and blockers.
-5. If you need clarification or a decision from the user before continuing or finalizing, include:
+1. Treat this initialization prompt as your durable bootstrap memory for project root, role source, shared pipeline, registries, and standing operating rules.
+2. For later messages from the orchestrator, expect compact delta-only handoffs. Do not require the orchestrator to resend project root, role source path, shared pipeline path, or generic role responsibilities each time.
+3. Read the role file and shared pipeline when you need to refresh stable rules, when a handoff says they changed, or when you detect ambiguity that cannot be resolved from memory.
+4. Work only as the `{role.role_id}` role. Do not take over orchestration or another role's responsibilities.
+5. Keep continuity inside this durable thread across future messages from the main orchestrator.
+6. Return concise handoff updates to the main orchestrator, including status, summary, outputs for the next stage, open questions, and blockers.
+7. If you need clarification or a decision from the user before continuing or finalizing, include:
    - USER QUESTION: <the exact user-facing question>
    - WHY IT BLOCKS: <why the workflow cannot continue safely without that answer>
-6. Do not directly message or continue other role threads. All handoffs go through the main orchestrator.
-7. In scheduled Codex automation, do not call Slack, GitHub, or other external network integrations directly from the restricted automation runtime. Ask the main orchestrator to use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}`.
-8. Use reasoning `{reasoning_level}` unless the main orchestrator overrides it. The default handoff safety cap for the workflow is `{max_handoff_turns}`.
-9. Prompt mode for this setup is `{prompt_mode}`.
+8. Do not directly message or continue other role threads. All handoffs go through the main orchestrator.
+9. In scheduled Codex automation, do not call Slack, GitHub, or other external network integrations directly from the restricted automation runtime. Ask the main orchestrator to use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}`.
+10. Use reasoning `{reasoning_level}` unless the main orchestrator overrides it. The default handoff safety cap for the workflow is `{max_handoff_turns}`.
+11. Prompt mode for this setup is `{prompt_mode}`.
 
 Initial response:
 - Confirm your role name, the role file, the shared pipeline, and whether you have any immediate `USER QUESTION:`.
@@ -676,6 +682,10 @@ This project uses durable Codex app threads for each configured role. The role m
 - The main chat is the orchestrator. Role threads report back to the main thread for handoff.
 - The main orchestrator must not perform the substantive work of the configured role threads; it may only orchestrate, route, summarize, and relay according to the pipeline.
 - Ordinary user tasks must be passed to the next role per pipeline in the form the user wrote them, unless the user is explicitly asking an orchestration question or issuing an orchestration command.
+- Durable-thread handoff context mode is `compact` after initialization. The orchestrator must send only the delta for the current move, not the full bootstrap packet.
+- Compact handoffs should include only: triggering user request or feedback, changed task/status, relevant files/commits/artifacts, the specific expected output for this move, and any new constraints.
+- Compact handoffs must not repeat project root, role source path, shared pipeline path, stable operating rules, or generic role responsibilities unless those changed or the role thread explicitly asks for them.
+- If a role thread reports missing context, resend only the missing piece.
 - The main orchestrator must message exactly one role thread at a time.
 - Parallel role-thread execution is forbidden, including validation roles.
 - If multiple validation roles are required, the orchestrator must message them sequentially and wait for each validation role to finish before messaging the next one.

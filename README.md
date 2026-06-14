@@ -43,3 +43,5 @@ Max handoff turns: 15
 ```
 
 Use `Backend: subagents` for ephemeral Codex subagents. Use `Backend: threads` when each role should live in its own durable Codex app thread. In thread mode, reuse is keyed by `role_id`, not by role file path, so `backend-developer` and `frontend-developer` can both point at the same `developer.md` file while keeping separate durable threads. Every created role thread is titled with the stable prefix `agent:`, for example `agent:backend-developer` or `agent:scenario-tester`. Shared role thread IDs are written to `.codex/orchestration/role-threads.json`; pipeline-specific references are written to `.codex/orchestration/pipelines/<pipeline_id>/threads.json`.
+
+Durable thread mode uses compact handoffs after initialization. Role threads receive full project/role/pipeline context once during bootstrap; later orchestration moves should send only the delta: user feedback, changed task/status, relevant files or commits, expected output, and new constraints.
