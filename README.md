@@ -29,7 +29,13 @@ Role path:
 - Scenario Tester: `<local root>/agents/scenario-tester.md`
 - Security Auditor: `<local root>/agents/security-auditor.md`
 
+Backend: threads
+
+Prompt mode: execute
+
 Reasoning: high
 
 Max handoff turns: 15
 ```
+
+Use `Backend: subagents` for ephemeral Codex subagents. Use `Backend: threads` when each role should live in its own durable Codex app thread. In thread mode, every created role thread is titled with the stable prefix `agent:`, for example `agent:developer` or `agent:scenario-tester`, and the thread IDs are written to `.codex/orchestration/threads.json`.

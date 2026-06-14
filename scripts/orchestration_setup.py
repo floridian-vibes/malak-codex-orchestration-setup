@@ -15,7 +15,14 @@ MANAGED_END = "<!-- END MALAK CODEX ORCHESTRATION SETUP -->"
 DEFAULT_SAFETY_CAP = 12
 DEFAULT_REASONING_LEVEL = "medium"
 ALLOWED_REASONING_LEVELS = ("none", "low", "medium", "high", "xhigh")
-ALLOWED_PROMPT_MODES = ("initialize subagents", "execute subagents")
+ALLOWED_BACKENDS = ("subagents", "threads")
+ALLOWED_PROMPT_MODES = ("initialize", "execute")
+LEGACY_PROMPT_MODES = (
+    "initialize subagents",
+    "execute subagents",
+    "initialize threads",
+    "execute threads",
+)
 EXTERNAL_ACCESS_BRIDGE = (
     "/Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/external_access_bridge.py"
 )
@@ -91,18 +98,42 @@ def derive_roles(role_paths: list[Path]) -> tuple[list[RoleSpec], list[str]]:
     return roles, warnings
 
 
-def normalize_prompt_mode(raw_prompt_mode: Any) -> str:
+def normalize_backend_and_prompt_mode(payload: dict[str, Any]) -> tuple[str, str]:
+    raw_backend = payload.get("orchestration_backend", payload.get("backend"))
+    if raw_backend in (None, ""):
+        backend: str | None = None
+    elif isinstance(raw_backend, str):
+        backend = raw_backend.strip().lower()
+    else:
+        raise ValueError("orchestration_backend must be a string")
+    if backend is not None and backend not in ALLOWED_BACKENDS:
+        allowed = ", ".join(ALLOWED_BACKENDS)
+        raise ValueError(f"orchestration_backend must be one of: {allowed}")
+
+    raw_prompt_mode = payload.get("prompt_mode")
     if not isinstance(raw_prompt_mode, str) or not raw_prompt_mode.strip():
-        allowed = ", ".join(ALLOWED_PROMPT_MODES)
+        allowed = ", ".join(ALLOWED_PROMPT_MODES + LEGACY_PROMPT_MODES)
         raise ValueError(f"prompt_mode is required and must be one of: {allowed}")
     prompt_mode = re.sub(r"\s+", " ", raw_prompt_mode.strip().lower())
+
+    if prompt_mode in LEGACY_PROMPT_MODES:
+        mode, legacy_backend = prompt_mode.split(" ", 1)
+        if backend is not None and backend != legacy_backend:
+            raise ValueError(
+                "prompt_mode backend conflicts with orchestration_backend "
+                f"({prompt_mode!r} vs {backend!r})"
+            )
+        return legacy_backend, mode
+
     if prompt_mode not in ALLOWED_PROMPT_MODES:
-        allowed = ", ".join(ALLOWED_PROMPT_MODES)
+        allowed = ", ".join(ALLOWED_PROMPT_MODES + LEGACY_PROMPT_MODES)
         raise ValueError(f"prompt_mode must be one of: {allowed}")
-    return prompt_mode
+    return backend or "subagents", prompt_mode
 
 
-def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec], str, int, str, list[str]]:
+def validate_payload(
+    payload: dict[str, Any],
+) -> tuple[Path, Path, list[RoleSpec], str, int, str, str, list[str]]:
     raw_project_root = payload.get("project_root")
     if isinstance(raw_project_root, str) and raw_project_root.strip():
         project_root = resolve_path(raw_project_root, "project_root")
@@ -136,7 +167,7 @@ def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec
         raise ValueError("max_handoff_turns must be an integer")
     if max_handoff_turns <= 0:
         raise ValueError("max_handoff_turns must be greater than 0")
-    prompt_mode = normalize_prompt_mode(payload.get("prompt_mode"))
+    orchestration_backend, prompt_mode = normalize_backend_and_prompt_mode(payload)
 
     role_paths: list[Path] = []
     for index, raw_role_path in enumerate(raw_role_paths, start=1):
@@ -164,7 +195,16 @@ def validate_payload(payload: dict[str, Any]) -> tuple[Path, Path, list[RoleSpec
         raise ValueError("; ".join(errors))
 
     roles, warnings = derive_roles(role_paths)
-    return project_root, pipeline_path, roles, reasoning_level, max_handoff_turns, prompt_mode, warnings
+    return (
+        project_root,
+        pipeline_path,
+        roles,
+        reasoning_level,
+        max_handoff_turns,
+        prompt_mode,
+        orchestration_backend,
+        warnings,
+    )
 
 
 def toml_escape(value: str) -> str:
@@ -208,12 +248,13 @@ def build_prompt_text(
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
+    orchestration_backend: str,
 ) -> str:
     role_names = ", ".join(role.slug for role in roles)
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
     bridge_dir = project_root / ".codex" / "external-access-bridge"
-    if prompt_mode == "initialize subagents":
-        task_block = """Initialization task:
+    if prompt_mode == "initialize":
+        subagent_task_block = """Initialization task:
 1. Initialize the configured agents sequentially, one at a time.
 2. For each agent, have it read its role file and the shared pipeline, then report:
    - mission
@@ -222,8 +263,18 @@ def build_prompt_text(
    - any immediate `USER QUESTION:`
 3. Do not start the next initialization agent until the current one has finished.
 4. Return a consolidated readiness report, then wait for my first task."""
+        thread_task_block = """Initialization task:
+1. Verify that every configured durable role thread exists in `.codex/orchestration/threads.json` and has a non-empty `thread_id`.
+2. Send one readiness request at a time to each role thread through Codex app thread messaging.
+3. For each role thread, ask it to read its role file and the shared pipeline, then report:
+   - mission
+   - expected inputs
+   - expected outputs
+   - any immediate `USER QUESTION:`
+4. Do not message the next role thread until the current role thread has replied.
+5. Return a consolidated readiness report, then wait for my first task."""
     else:
-        task_block = """Execution task:
+        subagent_task_block = """Execution task:
 1. Do not run a readiness-only initialization pass.
 2. Run the configured agents sequentially, one at a time, according to the shared pipeline and the task or run context I provide.
 3. For each agent, have it read its role file and the shared pipeline, then perform its role for the current workflow.
@@ -232,6 +283,59 @@ def build_prompt_text(
 6. If a required run context, source, artifact root, or output target is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
 7. Do not start the next agent until the current one has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
 8. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
+        thread_task_block = """Execution task:
+1. Do not run a readiness-only initialization pass.
+2. Use the configured durable role threads sequentially, one at a time, according to the shared pipeline and the task or run context I provide.
+3. For each role, send the current move to the matching existing thread from `.codex/orchestration/threads.json`; do not spawn Codex subagents for these configured roles.
+4. Before the first role-thread handoff, create any required local artifact root or output directories from the pipeline.
+5. Give each role thread the current task or run context, the artifact or output requirements from the pipeline, and an explicit instruction to save or return the role-specific output expected by its role and the pipeline.
+6. If a required run context, source, artifact root, output target, or role thread id is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
+7. Do not message the next role thread until the current role thread has returned its artifact path, role output, blocker, or explicit no-op/no-finding result.
+8. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
+
+    if orchestration_backend == "threads":
+        registry_path = project_root / ".codex" / "orchestration" / "threads.json"
+        role_thread_lines = "\n".join(
+            f"- `{role.slug}`: title `agent:{role.slug}`, role file `{role.path}`" for role in roles
+        )
+        return f"""Use durable project role threads registered at `{registry_path}`: {role_names}.
+
+Core rules:
+- You are the main orchestrator only. Never do the substantive work of any role thread yourself.
+- Do not spawn Codex subagents for the configured roles. Use the existing durable role threads from `{registry_path}`.
+- Every durable role thread created or repaired for this workflow must have a title beginning with `agent:` and should use the exact title `agent:<agent name>`, where `<agent name>` is the configured role slug. Example: `agent:developer`.
+- Default mode: if I give a task, pass it unchanged to the role thread that should act next under `{pipeline_path}`.
+- Exception: only treat my message as an orchestration request when I explicitly ask about routing, handoff, pause/resume, limits, role choice, or fixing the workflow.
+- All handoffs go through the main orchestrator thread; role threads must not message or continue each other directly.
+- Run exactly one role thread at a time. Parallel role-thread execution is forbidden, including validation roles.
+- If multiple validation roles are required, message them sequentially and wait for each validation role to finish before contacting the next one.
+- When a role-thread move advances the pipeline, reread `{pipeline_path}`, detect the latest `HANDOFF: ...` marker when used, and route the next move automatically without waiting for my reminder.
+- Pause only for a terminal condition, a safety-cap hit, a missing role thread id, or a blocking `USER QUESTION:`. Surface blocking user questions in the main chat immediately, especially from the architect.
+- Before the first role-thread handoff, create required local artifact or output directories. Treat directory setup as a blocker only if this preflight creation fails.
+- In scheduled Codex automation, do not call Slack or GitHub directly from the restricted automation runtime. Use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}` for Slack/GitHub operations.
+- Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
+- Prompt mode: `{prompt_mode}`.
+- Orchestration backend: `threads`.
+
+{thread_task_block}
+
+Configured durable role threads:
+{role_thread_lines}
+
+Shared pipeline:
+- `{pipeline_path}`
+
+Scheduled automation external access:
+- Bridge helper: `{EXTERNAL_ACCESS_BRIDGE}`
+- Project-local bridge dir: `{bridge_dir}`
+- Setup/preflight from an interactive Codex or Terminal session:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request preflight`
+- Slack delivery from automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+- GitHub API/read access from automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request github-get --api-path /repos/<owner>/<repo> --output <path>`
+"""
 
     return f"""Use these configured project subagents: {role_names}.
 
@@ -248,8 +352,9 @@ Core rules:
 - In scheduled Codex automation, do not call Slack or GitHub directly from the restricted automation runtime. Use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}` for Slack/GitHub operations.
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
 - Prompt mode: `{prompt_mode}`.
+- Orchestration backend: `subagents`.
 
-{task_block}
+{subagent_task_block}
 
 Configured roles:
 {role_lines}
@@ -270,6 +375,109 @@ Scheduled automation external access:
 """
 
 
+def build_thread_role_prompt(
+    role: RoleSpec,
+    pipeline_path: Path,
+    project_root: Path,
+    reasoning_level: str,
+    max_handoff_turns: int,
+    prompt_mode: str,
+) -> str:
+    registry_path = project_root / ".codex" / "orchestration" / "threads.json"
+    return f"""You are the durable `{role.slug}` role thread for this Codex orchestration project.
+
+Thread title rule:
+- Your thread title must be `agent:{role.slug}`.
+- If your title does not start with `agent:`, ask the orchestrator to rename it before continuing.
+
+Project root:
+- `{project_root}`
+
+Role source:
+- `{role.path}`
+
+Shared pipeline:
+- `{pipeline_path}`
+
+Thread registry:
+- `{registry_path}`
+
+Operating rules:
+1. Before every move, read the role file and shared pipeline from their original absolute paths.
+2. Work only as the `{role.slug}` role. Do not take over orchestration or another role's responsibilities.
+3. Keep continuity inside this durable thread across future messages from the main orchestrator.
+4. Return concise handoff updates to the main orchestrator, including status, summary, outputs for the next stage, open questions, and blockers.
+5. If you need clarification or a decision from the user before continuing or finalizing, include:
+   - USER QUESTION: <the exact user-facing question>
+   - WHY IT BLOCKS: <why the workflow cannot continue safely without that answer>
+6. Do not directly message or continue other role threads. All handoffs go through the main orchestrator.
+7. In scheduled Codex automation, do not call Slack, GitHub, or other external network integrations directly from the restricted automation runtime. Ask the main orchestrator to use the LaunchAgent-backed external access bridge at `{EXTERNAL_ACCESS_BRIDGE}`.
+8. Use reasoning `{reasoning_level}` unless the main orchestrator overrides it. The default handoff safety cap for the workflow is `{max_handoff_turns}`.
+9. Prompt mode for this setup is `{prompt_mode}`.
+
+Initial response:
+- Confirm your role name, the role file, the shared pipeline, and whether you have any immediate `USER QUESTION:`.
+"""
+
+
+def build_threads_registry(
+    roles: list[RoleSpec],
+    pipeline_path: Path,
+    project_root: Path,
+    reasoning_level: str,
+    max_handoff_turns: int,
+    prompt_mode: str,
+    thread_ids: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    thread_ids = thread_ids or {}
+    return {
+        "backend": "threads",
+        "project_root": str(project_root),
+        "pipeline_path": str(pipeline_path),
+        "prompt_mode": prompt_mode,
+        "reasoning_level": reasoning_level,
+        "max_handoff_turns": max_handoff_turns,
+        "title_rule": "agent:<agent name>",
+        "roles": [
+            {
+                "slug": role.slug,
+                "display_name": role.display_name,
+                "role_path": str(role.path),
+                "thread_title": f"agent:{role.slug}",
+                "thread_id": thread_ids.get(role.slug),
+            }
+            for role in roles
+        ],
+    }
+
+
+def extract_thread_ids(payload: dict[str, Any], roles: list[RoleSpec]) -> dict[str, str]:
+    raw_thread_ids = payload.get("thread_ids")
+    if raw_thread_ids is None:
+        raw_role_threads = payload.get("role_threads")
+        if isinstance(raw_role_threads, list):
+            raw_thread_ids = {
+                item.get("slug"): item.get("thread_id")
+                for item in raw_role_threads
+                if isinstance(item, dict)
+            }
+    if not isinstance(raw_thread_ids, dict):
+        raise ValueError("thread_ids must be an object mapping role slug to thread id")
+
+    expected_slugs = {role.slug for role in roles}
+    thread_ids: dict[str, str] = {}
+    missing: list[str] = []
+    for slug in sorted(expected_slugs):
+        value = raw_thread_ids.get(slug)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(slug)
+        else:
+            thread_ids[slug] = value.strip()
+    if missing:
+        raise ValueError("missing thread_ids for role slug(s): " + ", ".join(missing))
+    return thread_ids
+
+
 def build_agents_md_block(
     roles: list[RoleSpec],
     pipeline_path: Path,
@@ -277,9 +485,102 @@ def build_agents_md_block(
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
+    orchestration_backend: str,
 ) -> str:
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
     bridge_dir = project_root / ".codex" / "external-access-bridge"
+    if orchestration_backend == "threads":
+        registry_path = project_root / ".codex" / "orchestration" / "threads.json"
+        prompt_path = project_root / ".codex" / "prompts" / "thread-orchestration.md"
+        role_thread_lines = "\n".join(
+            f"- `{role.slug}`: title `agent:{role.slug}`, role file `{role.path}`"
+            for role in roles
+        )
+        return f"""{MANAGED_BEGIN}
+## Codex Durable Role Thread Workflow
+
+This project uses durable Codex app threads for each configured role. The role markdown files and the shared pipeline remain at their original source paths and must not be copied into the project.
+
+### Source Of Truth
+
+- Shared pipeline: `{pipeline_path}`
+- Thread registry: `{registry_path}`
+- Standard orchestration prompt: `{prompt_path}`
+- Default reasoning level: `{reasoning_level}`
+- Default max handoff turns: `{max_handoff_turns}`
+- Configured prompt mode: `{prompt_mode}`
+- Orchestration backend: `threads`
+
+### Durable Role Threads
+
+{role_thread_lines}
+
+### Thread Naming Rule
+
+- Every role thread created or repaired by the orchestrator must have a title that starts with `agent:`.
+- Use the exact title `agent:<agent name>`, where `<agent name>` is the configured role slug. Example: `agent:developer`.
+- The orchestrator must record each thread id in `{registry_path}`.
+
+### Orchestration Rules
+
+- Use durable role threads from `{registry_path}` when the user asks for the configured workflow.
+- Do not spawn Codex subagents for the configured roles.
+- The main chat is the orchestrator. Role threads report back to the main thread for handoff.
+- The main orchestrator must not perform the substantive work of the configured role threads; it may only orchestrate, route, summarize, and relay according to the pipeline.
+- Ordinary user tasks must be passed to the next role per pipeline in the form the user wrote them, unless the user is explicitly asking an orchestration question or issuing an orchestration command.
+- The main orchestrator must message exactly one role thread at a time.
+- Parallel role-thread execution is forbidden, including validation roles.
+- If multiple validation roles are required, the orchestrator must message them sequentially and wait for each validation role to finish before messaging the next one.
+- Follow the shared pipeline file for sequencing, dependencies, and handoff expectations.
+- If a source role file or the pipeline changes, reread it from the original path instead of duplicating it.
+- Missing local artifact or output directories are not blockers before preflight. The main orchestrator must create them before the first role-thread handoff; block only if creation fails.
+- Missing role thread IDs in `{registry_path}` are blockers. The orchestrator must ask the user to create or repair the missing durable role threads.
+
+### Scheduled Automation External Access
+
+Scheduled Codex automation may have restricted DNS or external network access. If this workflow needs Slack delivery, GitHub API reads, GitHub raw file reads, or similar external integration during a scheduled run, the orchestrator must not call those services directly from the automation runtime.
+
+Use the LaunchAgent-backed external access bridge instead:
+
+- Bridge helper: `{EXTERNAL_ACCESS_BRIDGE}`
+- Project-local bridge dir: `{bridge_dir}`
+- Install or refresh the user-session LaunchAgent from an interactive Codex or Terminal session:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} install-launchagent`
+- Preflight the request bridge through LaunchAgent:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request preflight`
+- Send Slack messages from scheduled automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request slack-post --channel <CHANNEL_ID> --text <MESSAGE>`
+- Read GitHub API or allowed GitHub HTTPS URLs from scheduled automation:
+  `python3 {EXTERNAL_ACCESS_BRIDGE} --bridge-dir {bridge_dir} request github-get --api-path /repos/<owner>/<repo> --output <path>`
+
+The bridge must use secrets only from `~/Workspace/command-center/secrets/...` or environment overrides. Never put tokens in role files, pipeline files, `AGENTS.md`, generated prompts, or automation prompts.
+
+The scheduled automation run must never call `install-launchagent`. `install-launchagent` is setup-only and registers a demand-start LaunchAgent with `RunAtLoad = false` and `KeepAlive = false`. Scheduled automation uses `request ...`: the helper writes a request JSON, kickstarts the already-installed LaunchAgent, waits for a response, and then the LaunchAgent exits. If the LaunchAgent is not already installed or loaded, record a blocker with owner and next action.
+
+If the bridge preflight fails, record the blocker, owner, next action, and the artifact that still needs delivery. Do not silently fall back to direct scheduled-runtime Slack or GitHub calls.
+
+### Auto-Handoff Mode
+
+- When the user asks to start or continue the configured workflow, the main orchestrator must run automatic handoff by default.
+- After each role thread finishes one move, the main orchestrator must:
+  1. Read the full shared pipeline file at `{pipeline_path}`.
+  2. Detect the latest `HANDOFF: ...` marker when the pipeline uses that convention.
+  3. Route the next move to the addressed durable role thread from the main orchestrator thread.
+  4. Repeat until a terminal condition is reached, the user stops the workflow, or the max-turn limit is hit.
+- Role threads must not directly continue each other. All handoffs go through the main orchestrator.
+- If a role-thread move advances the pipeline and no blocker is present, the orchestrator must continue the next handoff automatically without waiting for user reminder.
+- Unless the user explicitly overrides it for a run, use a safety cap of `{max_handoff_turns}` handoff turns, report when it is reached, and ask whether to continue.
+- If a role thread asks a blocking user-facing question, stop the auto-handoff loop and relay that question in the main chat before continuing.
+
+### User Question Relay
+
+- If a role thread needs clarification or a decision from the user without which it cannot continue or finalize safely, the orchestrator must surface that question in the main chat immediately.
+- This rule is especially strict for the architect role: if the architect asks a question at the beginning or end of its move, the orchestrator must relay it to the user and must not leave it only in the architect role thread.
+- When a role thread emits a `USER QUESTION:` section, the orchestrator must copy the question into the main chat, explain that the workflow is paused on user input, and wait for the answer.
+
+{MANAGED_END}
+"""
+
     return f"""{MANAGED_BEGIN}
 ## Codex Subagent Workflow
 
@@ -292,6 +593,7 @@ The role markdown files and the shared pipeline remain at their original source 
 - Default reasoning level: `{reasoning_level}`
 - Default max handoff turns: `{max_handoff_turns}`
 - Configured prompt mode: `{prompt_mode}`
+- Orchestration backend: `subagents`
 
 ### Role Files
 
@@ -310,8 +612,8 @@ The role markdown files and the shared pipeline remain at their original source 
 - Follow the shared pipeline file for sequencing, dependencies, and handoff expectations.
 - If a source role file or the pipeline changes, reread it from the original path instead of duplicating it.
 - The standard orchestration prompt lives at `.codex/prompts/subagent-init.md`.
-- In `initialize subagents` prompt mode, use the prompt only to initialize child agents and collect readiness reports.
-- In `execute subagents` prompt mode, use the prompt to make child agents perform their roles for the current task or run context and produce the role-specific outputs required by the pipeline.
+- In `initialize` prompt mode, use the prompt only to initialize child agents and collect readiness reports.
+- In `execute` prompt mode, use the prompt to make child agents perform their roles for the current task or run context and produce the role-specific outputs required by the pipeline.
 - Missing local artifact or output directories are not blockers before preflight. The main orchestrator must create them before the first child handoff; block only if creation fails.
 
 ### Scheduled Automation External Access
@@ -388,25 +690,68 @@ def write_setup(
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
+    orchestration_backend: str,
 ) -> dict[str, Any]:
     warnings: list[str] = []
     written_paths: list[str] = []
 
     agents_dir = project_root / ".codex" / "agents"
+    orchestration_dir = project_root / ".codex" / "orchestration"
     prompts_dir = project_root / ".codex" / "prompts"
     agents_md_path = project_root / "AGENTS.md"
-    prompt_path = prompts_dir / "subagent-init.md"
+    prompt_name = "subagent-init.md" if orchestration_backend == "subagents" else "thread-orchestration.md"
+    prompt_path = prompts_dir / prompt_name
 
-    agents_dir.mkdir(parents=True, exist_ok=True)
     prompts_dir.mkdir(parents=True, exist_ok=True)
 
-    for role in roles:
-        agent_path = agents_dir / f"{role.slug}.toml"
-        agent_path.write_text(
-            build_agent_toml(role, pipeline_path, reasoning_level),
-            encoding="utf-8",
+    thread_creation_requests: list[dict[str, str]] = []
+    registry_path: Path | None = None
+    if orchestration_backend == "subagents":
+        agents_dir.mkdir(parents=True, exist_ok=True)
+        for role in roles:
+            agent_path = agents_dir / f"{role.slug}.toml"
+            agent_path.write_text(
+                build_agent_toml(role, pipeline_path, reasoning_level),
+                encoding="utf-8",
+            )
+            written_paths.append(str(agent_path))
+    else:
+        orchestration_dir.mkdir(parents=True, exist_ok=True)
+        role_prompts_dir = prompts_dir / "thread-roles"
+        role_prompts_dir.mkdir(parents=True, exist_ok=True)
+        registry_path = orchestration_dir / "threads.json"
+        registry = build_threads_registry(
+            roles,
+            pipeline_path,
+            project_root,
+            reasoning_level,
+            max_handoff_turns,
+            prompt_mode,
         )
-        written_paths.append(str(agent_path))
+        registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+        written_paths.append(str(registry_path))
+
+        for role in roles:
+            role_prompt = build_thread_role_prompt(
+                role,
+                pipeline_path,
+                project_root,
+                reasoning_level,
+                max_handoff_turns,
+                prompt_mode,
+            )
+            role_prompt_path = role_prompts_dir / f"{role.slug}.md"
+            role_prompt_path.write_text(role_prompt, encoding="utf-8")
+            written_paths.append(str(role_prompt_path))
+            thread_creation_requests.append(
+                {
+                    "slug": role.slug,
+                    "display_name": role.display_name,
+                    "thread_title": f"agent:{role.slug}",
+                    "prompt_path": str(role_prompt_path),
+                    "prompt": role_prompt,
+                }
+            )
 
     prompt_text = build_prompt_text(
         roles,
@@ -415,6 +760,7 @@ def write_setup(
         reasoning_level,
         max_handoff_turns,
         prompt_mode,
+        orchestration_backend,
     )
     prompt_path.write_text(prompt_text, encoding="utf-8")
     written_paths.append(str(prompt_path))
@@ -426,6 +772,7 @@ def write_setup(
         reasoning_level,
         max_handoff_turns,
         prompt_mode,
+        orchestration_backend,
     )
     agents_md_content, replaced_managed_block = update_agents_md(agents_md_path, agents_md_block)
     agents_md_path.write_text(agents_md_content, encoding="utf-8")
@@ -441,20 +788,70 @@ def write_setup(
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
         "prompt_mode": prompt_mode,
+        "orchestration_backend": orchestration_backend,
         "agent_names": [role.slug for role in roles],
         "roles": [
             {
                 "slug": role.slug,
                 "display_name": role.display_name,
                 "path": str(role.path),
+                "thread_title": f"agent:{role.slug}",
             }
             for role in roles
         ],
         "agents_md_path": str(agents_md_path),
         "prompt_path": str(prompt_path),
         "prompt_text": prompt_text,
+        "threads_registry_path": str(registry_path) if registry_path else None,
+        "thread_creation_requests": thread_creation_requests,
         "written_paths": written_paths,
         "warnings": warnings,
+    }
+
+
+def register_threads(
+    project_root: Path,
+    pipeline_path: Path,
+    roles: list[RoleSpec],
+    reasoning_level: str,
+    max_handoff_turns: int,
+    prompt_mode: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    thread_ids = extract_thread_ids(payload, roles)
+    orchestration_dir = project_root / ".codex" / "orchestration"
+    orchestration_dir.mkdir(parents=True, exist_ok=True)
+    registry_path = orchestration_dir / "threads.json"
+    registry = build_threads_registry(
+        roles,
+        pipeline_path,
+        project_root,
+        reasoning_level,
+        max_handoff_turns,
+        prompt_mode,
+        thread_ids,
+    )
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+    return {
+        "ok": True,
+        "project_root": str(project_root),
+        "pipeline_path": str(pipeline_path),
+        "reasoning_level": reasoning_level,
+        "max_handoff_turns": max_handoff_turns,
+        "prompt_mode": prompt_mode,
+        "orchestration_backend": "threads",
+        "threads_registry_path": str(registry_path),
+        "role_threads": [
+            {
+                "slug": role.slug,
+                "display_name": role.display_name,
+                "thread_title": f"agent:{role.slug}",
+                "thread_id": thread_ids[role.slug],
+            }
+            for role in roles
+        ],
+        "written_paths": [str(registry_path)],
+        "warnings": [],
     }
 
 
@@ -465,13 +862,25 @@ def doctor(
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
+    orchestration_backend: str,
     warnings: list[str],
 ) -> dict[str, Any]:
-    planned_paths = [
-        str(project_root / ".codex" / "prompts" / "subagent-init.md"),
-        str(project_root / "AGENTS.md"),
-    ]
-    planned_paths.extend(str(project_root / ".codex" / "agents" / f"{role.slug}.toml") for role in roles)
+    if orchestration_backend == "subagents":
+        planned_paths = [
+            str(project_root / ".codex" / "prompts" / "subagent-init.md"),
+            str(project_root / "AGENTS.md"),
+        ]
+        planned_paths.extend(str(project_root / ".codex" / "agents" / f"{role.slug}.toml") for role in roles)
+    else:
+        planned_paths = [
+            str(project_root / ".codex" / "orchestration" / "threads.json"),
+            str(project_root / ".codex" / "prompts" / "thread-orchestration.md"),
+            str(project_root / "AGENTS.md"),
+        ]
+        planned_paths.extend(
+            str(project_root / ".codex" / "prompts" / "thread-roles" / f"{role.slug}.md")
+            for role in roles
+        )
 
     return {
         "ok": True,
@@ -480,23 +889,26 @@ def doctor(
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
         "prompt_mode": prompt_mode,
+        "orchestration_backend": orchestration_backend,
         "agent_names": [role.slug for role in roles],
         "roles": [
             {
                 "slug": role.slug,
                 "display_name": role.display_name,
                 "path": str(role.path),
+                "thread_title": f"agent:{role.slug}",
             }
             for role in roles
         ],
         "planned_paths": planned_paths,
+        "thread_title_rule": "agent:<agent name>",
         "warnings": warnings,
     }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Set up Codex project orchestration files.")
-    parser.add_argument("command", choices=("doctor", "setup"))
+    parser.add_argument("command", choices=("doctor", "setup", "register-threads"))
     parser.add_argument("--stdin", action="store_true", help="Read JSON payload from stdin.")
     args = parser.parse_args()
 
@@ -511,6 +923,7 @@ def main() -> int:
             reasoning_level,
             max_handoff_turns,
             prompt_mode,
+            orchestration_backend,
             warnings,
         ) = validate_payload(payload)
         if args.command == "doctor":
@@ -521,8 +934,22 @@ def main() -> int:
                 reasoning_level,
                 max_handoff_turns,
                 prompt_mode,
+                orchestration_backend,
                 warnings,
             )
+        elif args.command == "register-threads":
+            if orchestration_backend != "threads":
+                raise ValueError("register-threads requires orchestration_backend='threads'")
+            result = register_threads(
+                project_root,
+                pipeline_path,
+                roles,
+                reasoning_level,
+                max_handoff_turns,
+                prompt_mode,
+                payload,
+            )
+            result["warnings"] = warnings + result.get("warnings", [])
         else:
             result = write_setup(
                 project_root,
@@ -531,6 +958,7 @@ def main() -> int:
                 reasoning_level,
                 max_handoff_turns,
                 prompt_mode,
+                orchestration_backend,
             )
             result["warnings"] = warnings + result.get("warnings", [])
         print(json.dumps(result, indent=2))
