@@ -22,7 +22,8 @@ This skill is setup-oriented:
 - keep the main orchestrator in a coordination-only role instead of letting it do agent work itself;
 - force all child agents or durable role threads to run strictly sequentially, including validation roles;
 - force user-facing questions from subagents or durable role threads, especially the architect, to be relayed in the main chat;
-- when using durable thread mode, title every role thread with the exact prefix `agent:` using the form `agent:<agent name>`, where `<agent name>` is the generated role slug;
+- when using durable thread mode, title every role thread with the exact prefix `agent:` using the form `agent:<role_id>`, where `role_id` is the explicit role identity;
+- when using durable thread mode, reuse existing project role threads by `role_id` from `.codex/orchestration/role-threads.json`; do not use `role_path` as identity because multiple distinct roles can share the same role file;
 - avoid copying role or pipeline files into `.codex` or elsewhere in the project.
 
 ## External Credentials And Auth Policy
@@ -76,37 +77,42 @@ Collect inputs in this order. In interactive mode, if the current user message d
 
 1. `pipeline_path`
 2. `role_paths`
-3. `orchestration_backend`
-4. `prompt_mode`
-5. `reasoning_level`
-6. `max_handoff_turns`
-7. `project_root` only when the current workspace should not be used
+3. `pipeline_id`
+4. `orchestration_backend`
+5. `prompt_mode`
+6. `reasoning_level`
+7. `max_handoff_turns`
+8. `project_root` only when the current workspace should not be used
 
 Input rules:
 
 - `pipeline_path` must point to the shared file that describes sequencing, handoffs, or collaboration rules for the agents.
-- `role_paths` must be a list of markdown files, one per agent role.
+- `role_paths` must be a list of markdown role definitions, one per agent role. Each entry may be a plain role file path, a string in the form `<role_id>: <path>`, or an object with `role_id` and `path`.
+- `role_id` is the stable identity for reuse in durable thread mode. It is not the same as `role_path`; different role IDs may point to the same role file.
+- `pipeline_id` is optional. If omitted, the helper derives it from the pipeline filename. Use an explicit `pipeline_id` when one project has several pipelines with similar filenames or when you want a stable custom registry path.
 - `orchestration_backend` must be one of `subagents` or `threads`.
 - `prompt_mode` must be one of `initialize` or `execute`.
 - For backward compatibility, accept legacy prompt modes `initialize subagents`, `execute subagents`, `initialize threads`, and `execute threads`; normalize them to `orchestration_backend` plus `prompt_mode`.
 - `reasoning_level` must be one of `none`, `low`, `medium`, `high`, or `xhigh`.
 - `max_handoff_turns` must be a positive integer.
 - In subagent mode, `project_root` must be the project where Codex should create `.codex/agents/*.toml`, `.codex/prompts/subagent-init.md`, and `AGENTS.md`.
-- In durable thread mode, `project_root` must be the project where Codex should create `.codex/orchestration/threads.json`, `.codex/prompts/thread-orchestration.md`, `.codex/prompts/thread-roles/*.md`, and `AGENTS.md`.
+- In durable thread mode, `project_root` must be the project where Codex should create `.codex/orchestration/role-threads.json`, `.codex/orchestration/pipelines/<pipeline_id>/threads.json`, `.codex/prompts/thread-orchestration.md`, `.codex/prompts/thread-roles/*.md`, and `AGENTS.md`.
 - Role and pipeline files should stay in their original locations. This skill must not copy them into the target project.
 
 Default assumptions:
 
 - If `project_root` is missing, use the current workspace path by default.
+- If `pipeline_id` is missing, derive it from the pipeline filename.
 - If `orchestration_backend` is missing, use `subagents` by default unless the user asks for separate, persistent, durable, or long-lived role threads.
 - If `prompt_mode` is missing, ask for it. There is no default prompt mode.
 - If `reasoning_level` is missing, use `medium` by default.
 - If `max_handoff_turns` is missing, use `12` by default.
 - If the user provides role paths as a newline-separated list or bullets, normalize them to an array without asking for reformatting.
-- If a role filename already maps cleanly to a slug, use that slug for the project-local Codex agent name or durable role thread name.
-- If multiple role files normalize to the same slug, append a numeric suffix and report the final names.
+- If a role entry has an explicit `role_id`, use that as the project-local Codex agent name or durable role thread identity.
+- If a role entry is only a path, derive `role_id` from the role filename.
+- If multiple role entries normalize to the same `role_id`, append a numeric suffix and report the final names.
 - Always write `AGENTS.md` with uppercase because that is the Codex-recognized filename, even if the user says `agents.md`.
-- In durable thread mode, every thread created for a role must be titled `agent:<agent name>`, where `<agent name>` is the generated role slug, for example `agent:developer`.
+- In durable thread mode, every thread created for a role must be titled `agent:<role_id>`, for example `agent:backend-developer`.
 
 ## Canonical First Question
 
@@ -119,8 +125,10 @@ Pipeline:
 - <path-to-your-pipeline>
 
 Role path:
-- <path-to-agent-role-1>
-- <path-to-agent-role-2>
+- <role_id-1>: <path-to-agent-role-1>
+- <role_id-2>: <path-to-agent-role-2>
+
+Pipeline id: <stable-pipeline-id, optional>
 
 Backend: <subagents (default) | threads>
 
@@ -137,13 +145,17 @@ Question rules:
 - If the current workspace should be used, the user may leave `Project root` blank and the skill should resolve it to the current workspace.
 - If the user wants a different target project than the current workspace, ask one short follow-up question for `project_root` after they return the markdown.
 - If any of `Pipeline`, `Role path`, or `Prompt mode` is missing, show the full canonical block again instead of asking a single-field question.
+- If `Pipeline id` is missing, derive it from the pipeline filename.
 - If `Backend` is missing, use `subagents` by default unless the user explicitly asked for separate, persistent, durable, or long-lived role threads.
+- Role path entries should use explicit `role_id` when role identity matters, especially when multiple roles share the same role file:
+  - `backend-developer: /path/to/developer.md`
+  - `frontend-developer: /path/to/developer.md`
 - Prompt mode options should be interpreted as:
   - `initialize`: only initialize configured child agents or role threads and collect readiness reports: mission, expected inputs, expected outputs, immediate blockers
   - `execute`: make the orchestrator drive configured child agents or role threads to perform their roles for the user task or run context, including collecting data and producing the role-specific outputs required by the pipeline
 - Backend options should be interpreted as:
   - `subagents`: create project-local `.codex/agents/*.toml` definitions and use Codex subagents as ephemeral child workers
-  - `threads`: create separate durable Codex app role threads, save their thread IDs in `.codex/orchestration/threads.json`, and route future handoffs to those existing threads
+  - `threads`: create separate durable Codex app role threads, save reusable role thread IDs in `.codex/orchestration/role-threads.json`, save pipeline-specific role references in `.codex/orchestration/pipelines/<pipeline_id>/threads.json`, and route future handoffs to those existing threads
 - If they omit `Reasoning`, use `medium`.
 - If they omit `Max handoff turns`, use `12`.
 - Reasoning options should be interpreted as:
@@ -175,7 +187,7 @@ No canonical git prefix is required for the normal workflow.
 4. Collect `prompt_mode` from the user; if it is missing, ask for it. Do not use a default prompt mode.
 5. Resolve `reasoning_level` to `medium` by default when the user leaves it blank.
 6. Resolve `max_handoff_turns` to `12` by default when the user leaves it blank.
-7. Collect the final `project_root`, `pipeline_path`, `role_paths`, `orchestration_backend`, `prompt_mode`, `reasoning_level`, and `max_handoff_turns`.
+7. Collect the final `project_root`, `pipeline_path`, `pipeline_id`, `role_paths`, `orchestration_backend`, `prompt_mode`, `reasoning_level`, and `max_handoff_turns`.
 8. Start the helper with:
    `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py doctor --stdin`
 9. Send this JSON payload through stdin:
@@ -184,11 +196,13 @@ No canonical git prefix is required for the normal workflow.
 {
   "project_root": "/absolute/path/to/project",
   "pipeline_path": "/absolute/path/to/pipeline.md",
+  "pipeline_id": "development-pipeline",
   "role_paths": [
-    "/absolute/path/to/researcher.md",
-    "/absolute/path/to/planner.md",
-    "/absolute/path/to/implementer.md",
-    "/absolute/path/to/reviewer.md"
+    { "role_id": "researcher", "path": "/absolute/path/to/researcher.md" },
+    { "role_id": "planner", "path": "/absolute/path/to/planner.md" },
+    { "role_id": "backend-developer", "path": "/absolute/path/to/developer.md" },
+    { "role_id": "frontend-developer", "path": "/absolute/path/to/developer.md" },
+    { "role_id": "reviewer", "path": "/absolute/path/to/reviewer.md" }
   ],
   "orchestration_backend": "threads",
   "prompt_mode": "execute",
@@ -215,32 +229,38 @@ No canonical git prefix is required for the normal workflow.
    - embed scheduled automation external access rules that require Slack/GitHub calls to use the LaunchAgent-backed external access bridge instead of direct scheduled-runtime network calls;
    - return the rendered orchestration prompt and the written file paths.
 14. In durable thread mode, the helper will:
-   - create `.codex/orchestration/threads.json` with empty `thread_id` fields;
+   - read `.codex/orchestration/role-threads.json` when it exists;
+   - reuse existing durable role threads by `role_id`;
+   - create or update `.codex/orchestration/role-threads.json`;
+   - create `.codex/orchestration/pipelines/<pipeline_id>/threads.json` with existing `thread_id` fields for reused roles and empty `thread_id` fields for new roles;
    - create `.codex/prompts/thread-orchestration.md`;
-   - create one `.codex/prompts/thread-roles/<role>.md` initial prompt per role;
+   - create one `.codex/prompts/thread-roles/<role_id>.md` initial prompt per new role that does not already have a registered thread;
    - create or update `AGENTS.md` using a managed durable-thread block;
-   - return `thread_creation_requests`, each with `slug`, `thread_title`, `prompt_path`, and `prompt`.
+   - return `reused_role_threads` for existing role IDs;
+   - return `thread_creation_requests` only for missing role IDs, each with `role_id`, `thread_title`, `prompt_path`, and `prompt`.
 15. In durable thread mode, create one Codex app thread per `thread_creation_requests` entry by calling `codex_app.create_thread` with:
    - `target.type = "project"`
    - `target.projectId = <project_root>`
    - `target.environment.type = "local"`
    - `prompt = <thread_creation_request.prompt>`
    - `thinking = <reasoning_level>` when it is one of `low`, `medium`, `high`, or `xhigh`; omit for `none`
-16. After each durable role thread is created, call `codex_app.set_thread_title` and set its title exactly to `agent:<agent name>` from `thread_creation_request.thread_title`, for example `agent:developer`.
+16. After each durable role thread is created, call `codex_app.set_thread_title` and set its title exactly to `agent:<role_id>` from `thread_creation_request.thread_title`, for example `agent:backend-developer`.
 17. Do not pin durable role threads automatically. The `agent:` title prefix is the discovery mechanism.
-18. Collect the returned thread IDs into a JSON object keyed by role slug and run:
+18. Collect the returned thread IDs into a JSON object keyed by `role_id` and run:
    `python3 /Users/master/Workspace/My-skills/malak-codex-orchestration-setup/scripts/orchestration_setup.py register-threads --stdin`
-19. Send the same setup JSON payload plus the `thread_ids` object through stdin:
+19. Send the same setup JSON payload plus the `thread_ids` object through stdin. It may include only newly created role IDs; the helper will merge them with existing entries from `.codex/orchestration/role-threads.json`:
 
 ```json
 {
   "project_root": "/absolute/path/to/project",
   "pipeline_path": "/absolute/path/to/pipeline.md",
+  "pipeline_id": "development-pipeline",
   "role_paths": [
-    "/absolute/path/to/researcher.md",
-    "/absolute/path/to/planner.md",
-    "/absolute/path/to/implementer.md",
-    "/absolute/path/to/reviewer.md"
+    { "role_id": "researcher", "path": "/absolute/path/to/researcher.md" },
+    { "role_id": "planner", "path": "/absolute/path/to/planner.md" },
+    { "role_id": "backend-developer", "path": "/absolute/path/to/developer.md" },
+    { "role_id": "frontend-developer", "path": "/absolute/path/to/developer.md" },
+    { "role_id": "reviewer", "path": "/absolute/path/to/reviewer.md" }
   ],
   "orchestration_backend": "threads",
   "prompt_mode": "execute",
@@ -249,7 +269,8 @@ No canonical git prefix is required for the normal workflow.
   "thread_ids": {
     "researcher": "<thread-id>",
     "planner": "<thread-id>",
-    "implementer": "<thread-id>",
+    "backend-developer": "<thread-id>",
+    "frontend-developer": "<thread-id>",
     "reviewer": "<thread-id>"
   }
 }
@@ -331,13 +352,14 @@ Required behavior:
 - If the user does not specify a limit, use a default safety cap of `12` handoff turns, report when it is reached, and ask whether to continue.
 - If the user configures a project-specific max handoff cap during setup, generated project docs should use that configured value as the workflow default until explicitly overridden.
 - In subagent mode, the generated `AGENTS.md` and `.codex/prompts/subagent-init.md` should both carry these rules so the behavior survives reuse across future tasks.
-- In durable thread mode, the generated `AGENTS.md`, `.codex/prompts/thread-orchestration.md`, `.codex/prompts/thread-roles/*.md`, and `.codex/orchestration/threads.json` should carry enough information for the orchestrator to reuse existing role threads.
+- In durable thread mode, the generated `AGENTS.md`, `.codex/prompts/thread-orchestration.md`, `.codex/prompts/thread-roles/*.md`, `.codex/orchestration/role-threads.json`, and `.codex/orchestration/pipelines/<pipeline_id>/threads.json` should carry enough information for the orchestrator to reuse existing role threads.
 - The generated orchestration docs should also carry scheduled automation external access rules so Slack/GitHub calls route through the LaunchAgent bridge when needed.
 - The generated prompt should state this compactly so the orchestration intent is clear without unnecessary extra text.
 - In `initialize` prompt mode, the generated prompt should initialize configured child agents or role threads and collect readiness reports.
 - In `execute` prompt mode, the generated prompt must explicitly forbid readiness-only initialization and require child agents or role threads to perform their roles for the current task or run context.
 - Missing local artifact or output directories are not blockers before preflight. Generated docs must tell the main orchestrator to create them before the first child handoff, and to block only if creation fails.
-- In durable thread mode, generated docs must state that each created role thread title must start with `agent:` and should be exactly `agent:<agent name>`, where `<agent name>` is the role slug.
+- In durable thread mode, generated docs must state that each created role thread title must start with `agent:` and should be exactly `agent:<role_id>`, where `role_id` is the explicit role identity.
+- In durable thread mode, generated docs must state that reuse is keyed by `project_root + role_id`, not by `role_path`.
 
 ## User Question Relay
 
@@ -360,9 +382,10 @@ The helper writes these project files in subagent mode:
 
 The helper writes these project files in durable thread mode:
 
-- `<project_root>/.codex/orchestration/threads.json`
+- `<project_root>/.codex/orchestration/role-threads.json`
+- `<project_root>/.codex/orchestration/pipelines/<pipeline_id>/threads.json`
 - `<project_root>/.codex/prompts/thread-orchestration.md`
-- `<project_root>/.codex/prompts/thread-roles/<role>.md`
+- `<project_root>/.codex/prompts/thread-roles/<role_id>.md`
 - `<project_root>/AGENTS.md`
 
 Write rules:
@@ -371,7 +394,7 @@ Write rules:
 - Do not copy the source pipeline file.
 - Reference the original absolute paths inside generated TOML, JSON, prompts, and `AGENTS.md`.
 - If `AGENTS.md` already exists, update only the managed orchestration block and preserve the rest of the file.
-- In durable thread mode, write thread IDs only through `register-threads --stdin` after `codex_app.create_thread` returns actual IDs.
+- In durable thread mode, write new thread IDs only through `register-threads --stdin` after `codex_app.create_thread` returns actual IDs. Existing role IDs may be reused from `.codex/orchestration/role-threads.json` without creating new threads.
 
 ## Output Contract
 
@@ -381,13 +404,14 @@ Return:
 
 - a short confirmation that the orchestration setup was written
 - the target project path
+- the pipeline id that was applied
 - the orchestration backend that was applied
 - the prompt mode that was applied
 - the reasoning level that was applied
 - the max handoff turns that were applied
 - the final agent names that were created or role thread names that were configured
 - the paths to `AGENTS.md` and the generated orchestration prompt
-- in durable thread mode, the path to `.codex/orchestration/threads.json`, created role thread IDs, role thread titles, and one `::created-thread{threadId="..."}` directive per created thread
+- in durable thread mode, the path to `.codex/orchestration/role-threads.json`, the path to `.codex/orchestration/pipelines/<pipeline_id>/threads.json`, reused role threads, newly created role thread IDs, role thread titles, and one `::created-thread{threadId="..."}` directive per newly created thread
 - the orchestration prompt text ready to paste into the main Codex chat
 - on reruns, the same full orchestration prompt shape as on the first run
 - any warnings, such as slug collisions or pre-existing managed blocks that were refreshed
@@ -406,5 +430,5 @@ If the helper reports an error, return a short error explanation and the blocker
 - `Use $malak-codex-orchestration-setup to configure this project from these role markdown files and this pipeline without copying them.`
 - `Set up Codex subagents for /path/to/repo using these role files and this shared pipeline.`
 - `Set up durable Codex role threads for /path/to/repo using these role files and this shared pipeline.`
-- `Create separate persistent agent threads for each role and title them agent:<agent name>.`
+- `Create separate persistent agent threads for each role and title them agent:<role_id>.`
 - `Wire this project to a reusable Codex subagent workflow and generate the init prompt I should paste into the main chat.`

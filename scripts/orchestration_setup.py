@@ -30,9 +30,13 @@ EXTERNAL_ACCESS_BRIDGE = (
 
 @dataclass
 class RoleSpec:
-    slug: str
+    role_id: str
     display_name: str
     path: Path
+
+    @property
+    def slug(self) -> str:
+        return self.role_id
 
 
 def slugify(value: str) -> str:
@@ -78,24 +82,104 @@ def markdown_title(path: Path) -> str | None:
     return None
 
 
-def derive_roles(role_paths: list[Path]) -> tuple[list[RoleSpec], list[str]]:
+def clean_markdown_value(value: str) -> str:
+    value = value.strip()
+    value = value.strip("`")
+    return value.strip()
+
+
+def parse_role_entry(raw_entry: Any, index: int) -> tuple[str | None, Path, str | None]:
+    if isinstance(raw_entry, str):
+        entry = raw_entry.strip()
+        if not entry:
+            raise ValueError(f"role_paths[{index}] must not be empty")
+        explicit_role_id: str | None = None
+        raw_path = entry
+        if ":" in entry:
+            possible_role_id, possible_path = entry.split(":", 1)
+            if possible_role_id.strip() and possible_path.strip():
+                explicit_role_id = slugify(possible_role_id)
+                raw_path = possible_path.strip()
+        raw_path = clean_markdown_value(raw_path)
+        return explicit_role_id, resolve_path(raw_path, f"role_paths[{index}]"), None
+
+    if isinstance(raw_entry, dict):
+        raw_role_id = (
+            raw_entry.get("role_id")
+            or raw_entry.get("id")
+            or raw_entry.get("slug")
+            or raw_entry.get("name")
+        )
+        explicit_role_id = slugify(str(raw_role_id)) if raw_role_id not in (None, "") else None
+        raw_path = raw_entry.get("path") or raw_entry.get("role_path")
+        role_path = resolve_path(raw_path, f"role_paths[{index}].path")
+        raw_display_name = raw_entry.get("display_name")
+        display_name = str(raw_display_name).strip() if raw_display_name not in (None, "") else None
+        return explicit_role_id, role_path, display_name
+
+    raise ValueError(
+        f"role_paths[{index}] must be a path string, '<role_id>: <path>' string, or object"
+    )
+
+
+def derive_roles(raw_role_entries: list[Any]) -> tuple[list[RoleSpec], list[str]]:
     roles: list[RoleSpec] = []
     warnings: list[str] = []
     used: dict[str, int] = {}
 
-    for role_path in role_paths:
-        base_slug = slugify(role_path.stem)
-        count = used.get(base_slug, 0)
-        used[base_slug] = count + 1
-        slug = base_slug if count == 0 else f"{base_slug}-{count + 1}"
-        if slug != base_slug:
+    for index, raw_entry in enumerate(raw_role_entries, start=1):
+        explicit_role_id, role_path, explicit_display_name = parse_role_entry(raw_entry, index)
+        base_role_id = explicit_role_id or slugify(role_path.stem)
+        count = used.get(base_role_id, 0)
+        used[base_role_id] = count + 1
+        role_id = base_role_id if count == 0 else f"{base_role_id}-{count + 1}"
+        if role_id != base_role_id:
             warnings.append(
-                f"role slug collision for '{base_slug}', created '{slug}' for {role_path}"
+                f"role_id collision for '{base_role_id}', created '{role_id}' for {role_path}"
             )
-        title = markdown_title(role_path) or role_path.stem.replace("-", " ").replace("_", " ").title()
-        roles.append(RoleSpec(slug=slug, display_name=title, path=role_path))
+        title = (
+            explicit_display_name
+            or markdown_title(role_path)
+            or role_id.replace("-", " ").replace("_", " ").title()
+        )
+        roles.append(RoleSpec(role_id=role_id, display_name=title, path=role_path))
 
     return roles, warnings
+
+
+def role_registry_path(project_root: Path) -> Path:
+    return project_root / ".codex" / "orchestration" / "role-threads.json"
+
+
+def pipeline_registry_path(project_root: Path, pipeline_id: str) -> Path:
+    return project_root / ".codex" / "orchestration" / "pipelines" / pipeline_id / "threads.json"
+
+
+def load_json_file(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return data
+
+
+def existing_role_threads_by_id(project_root: Path) -> dict[str, dict[str, Any]]:
+    registry = load_json_file(role_registry_path(project_root))
+    raw_roles = registry.get("roles", [])
+    if not isinstance(raw_roles, list):
+        raise ValueError(f"{role_registry_path(project_root)} roles must be an array")
+    result: dict[str, dict[str, Any]] = {}
+    for item in raw_roles:
+        if not isinstance(item, dict):
+            continue
+        role_id = item.get("role_id") or item.get("slug")
+        if isinstance(role_id, str) and role_id.strip():
+            result[role_id.strip()] = item
+    return result
 
 
 def normalize_backend_and_prompt_mode(payload: dict[str, Any]) -> tuple[str, str]:
@@ -133,15 +217,22 @@ def normalize_backend_and_prompt_mode(payload: dict[str, Any]) -> tuple[str, str
 
 def validate_payload(
     payload: dict[str, Any],
-) -> tuple[Path, Path, list[RoleSpec], str, int, str, str, list[str]]:
+) -> tuple[Path, Path, str, list[RoleSpec], str, int, str, str, list[str]]:
     raw_project_root = payload.get("project_root")
     if isinstance(raw_project_root, str) and raw_project_root.strip():
         project_root = resolve_path(raw_project_root, "project_root")
     else:
         project_root = Path.cwd().resolve()
     pipeline_path = resolve_path(payload.get("pipeline_path"), "pipeline_path")
-    raw_role_paths = payload.get("role_paths")
-    if not isinstance(raw_role_paths, list) or not raw_role_paths:
+    raw_pipeline_id = payload.get("pipeline_id")
+    if raw_pipeline_id in (None, ""):
+        pipeline_id = slugify(pipeline_path.stem)
+    elif isinstance(raw_pipeline_id, str):
+        pipeline_id = slugify(raw_pipeline_id)
+    else:
+        raise ValueError("pipeline_id must be a string")
+    raw_role_entries = payload.get("role_paths")
+    if not isinstance(raw_role_entries, list) or not raw_role_entries:
         raise ValueError("role_paths must be a non-empty array")
     raw_reasoning_level = payload.get("reasoning_level")
     if raw_reasoning_level in (None, ""):
@@ -169,10 +260,7 @@ def validate_payload(
         raise ValueError("max_handoff_turns must be greater than 0")
     orchestration_backend, prompt_mode = normalize_backend_and_prompt_mode(payload)
 
-    role_paths: list[Path] = []
-    for index, raw_role_path in enumerate(raw_role_paths, start=1):
-        role_path = resolve_path(raw_role_path, f"role_paths[{index}]")
-        role_paths.append(role_path)
+    roles, warnings = derive_roles(raw_role_entries)
 
     errors: list[str] = []
     if not project_root.exists():
@@ -185,19 +273,19 @@ def validate_payload(
     elif not pipeline_path.is_file():
         errors.append(f"pipeline_path is not a file: {pipeline_path}")
 
-    for role_path in role_paths:
-        if not role_path.exists():
-            errors.append(f"role path does not exist: {role_path}")
-        elif not role_path.is_file():
-            errors.append(f"role path is not a file: {role_path}")
+    for role in roles:
+        if not role.path.exists():
+            errors.append(f"role path does not exist: {role.path}")
+        elif not role.path.is_file():
+            errors.append(f"role path is not a file: {role.path}")
 
     if errors:
         raise ValueError("; ".join(errors))
 
-    roles, warnings = derive_roles(role_paths)
     return (
         project_root,
         pipeline_path,
+        pipeline_id,
         roles,
         reasoning_level,
         max_handoff_turns,
@@ -244,6 +332,7 @@ def build_agent_toml(role: RoleSpec, pipeline_path: Path, reasoning_level: str) 
 def build_prompt_text(
     roles: list[RoleSpec],
     pipeline_path: Path,
+    pipeline_id: str,
     project_root: Path,
     reasoning_level: str,
     max_handoff_turns: int,
@@ -264,7 +353,7 @@ def build_prompt_text(
 3. Do not start the next initialization agent until the current one has finished.
 4. Return a consolidated readiness report, then wait for my first task."""
         thread_task_block = """Initialization task:
-1. Verify that every configured durable role thread exists in `.codex/orchestration/threads.json` and has a non-empty `thread_id`.
+1. Verify that every configured durable role thread exists in the pipeline registry under `.codex/orchestration/pipelines/<pipeline_id>/threads.json` and has a non-empty `thread_id`.
 2. Send one readiness request at a time to each role thread through Codex app thread messaging.
 3. For each role thread, ask it to read its role file and the shared pipeline, then report:
    - mission
@@ -286,7 +375,7 @@ def build_prompt_text(
         thread_task_block = """Execution task:
 1. Do not run a readiness-only initialization pass.
 2. Use the configured durable role threads sequentially, one at a time, according to the shared pipeline and the task or run context I provide.
-3. For each role, send the current move to the matching existing thread from `.codex/orchestration/threads.json`; do not spawn Codex subagents for these configured roles.
+3. For each role, send the current move to the matching existing thread from the pipeline registry under `.codex/orchestration/pipelines/<pipeline_id>/threads.json`; do not spawn Codex subagents for these configured roles.
 4. Before the first role-thread handoff, create any required local artifact root or output directories from the pipeline.
 5. Give each role thread the current task or run context, the artifact or output requirements from the pipeline, and an explicit instruction to save or return the role-specific output expected by its role and the pipeline.
 6. If a required run context, source, artifact root, output target, or role thread id is missing, ask a blocking `USER QUESTION:` in the main chat instead of silently downgrading to role description.
@@ -294,16 +383,18 @@ def build_prompt_text(
 8. After all required role outputs are complete, continue to the pipeline's synthesis, validation, or terminal step automatically."""
 
     if orchestration_backend == "threads":
-        registry_path = project_root / ".codex" / "orchestration" / "threads.json"
+        registry_path = pipeline_registry_path(project_root, pipeline_id)
+        role_registry = role_registry_path(project_root)
         role_thread_lines = "\n".join(
-            f"- `{role.slug}`: title `agent:{role.slug}`, role file `{role.path}`" for role in roles
+            f"- `{role.role_id}`: title `agent:{role.role_id}`, role file `{role.path}`" for role in roles
         )
         return f"""Use durable project role threads registered at `{registry_path}`: {role_names}.
 
 Core rules:
 - You are the main orchestrator only. Never do the substantive work of any role thread yourself.
 - Do not spawn Codex subagents for the configured roles. Use the existing durable role threads from `{registry_path}`.
-- Every durable role thread created or repaired for this workflow must have a title beginning with `agent:` and should use the exact title `agent:<agent name>`, where `<agent name>` is the configured role slug. Example: `agent:developer`.
+- Reuse project-level durable role threads from `{role_registry}` by `role_id`. If a role is already registered there, route to that existing thread instead of creating a duplicate.
+- Every durable role thread created or repaired for this workflow must have a title beginning with `agent:` and should use the exact title `agent:<role_id>`, where `<role_id>` is the configured role identity. Example: `agent:backend-developer`.
 - Default mode: if I give a task, pass it unchanged to the role thread that should act next under `{pipeline_path}`.
 - Exception: only treat my message as an orchestration request when I explicitly ask about routing, handoff, pause/resume, limits, role choice, or fixing the workflow.
 - All handoffs go through the main orchestrator thread; role threads must not message or continue each other directly.
@@ -316,6 +407,7 @@ Core rules:
 - Use reasoning `{reasoning_level}` unless I override it. Use a safety cap of `{max_handoff_turns}` unless I override it for this run.
 - Prompt mode: `{prompt_mode}`.
 - Orchestration backend: `threads`.
+- Pipeline id: `{pipeline_id}`.
 
 {thread_task_block}
 
@@ -378,17 +470,23 @@ Scheduled automation external access:
 def build_thread_role_prompt(
     role: RoleSpec,
     pipeline_path: Path,
+    pipeline_id: str,
     project_root: Path,
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
 ) -> str:
-    registry_path = project_root / ".codex" / "orchestration" / "threads.json"
-    return f"""You are the durable `{role.slug}` role thread for this Codex orchestration project.
+    registry_path = pipeline_registry_path(project_root, pipeline_id)
+    shared_registry_path = role_registry_path(project_root)
+    return f"""You are the durable `{role.role_id}` role thread for this Codex orchestration project.
 
 Thread title rule:
-- Your thread title must be `agent:{role.slug}`.
+- Your thread title must be `agent:{role.role_id}`.
 - If your title does not start with `agent:`, ask the orchestrator to rename it before continuing.
+
+Role identity:
+- Your stable `role_id` is `{role.role_id}`.
+- Reuse is keyed by `role_id`, not by role file path. Different role IDs may use the same role file.
 
 Project root:
 - `{project_root}`
@@ -402,9 +500,12 @@ Shared pipeline:
 Thread registry:
 - `{registry_path}`
 
+Project role registry:
+- `{shared_registry_path}`
+
 Operating rules:
 1. Before every move, read the role file and shared pipeline from their original absolute paths.
-2. Work only as the `{role.slug}` role. Do not take over orchestration or another role's responsibilities.
+2. Work only as the `{role.role_id}` role. Do not take over orchestration or another role's responsibilities.
 3. Keep continuity inside this durable thread across future messages from the main orchestrator.
 4. Return concise handoff updates to the main orchestrator, including status, summary, outputs for the next stage, open questions, and blockers.
 5. If you need clarification or a decision from the user before continuing or finalizing, include:
@@ -423,6 +524,7 @@ Initial response:
 def build_threads_registry(
     roles: list[RoleSpec],
     pipeline_path: Path,
+    pipeline_id: str,
     project_root: Path,
     reasoning_level: str,
     max_handoff_turns: int,
@@ -434,16 +536,19 @@ def build_threads_registry(
         "backend": "threads",
         "project_root": str(project_root),
         "pipeline_path": str(pipeline_path),
+        "pipeline_id": pipeline_id,
+        "project_role_registry_path": str(role_registry_path(project_root)),
         "prompt_mode": prompt_mode,
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
-        "title_rule": "agent:<agent name>",
+        "title_rule": "agent:<role_id>",
         "roles": [
             {
                 "slug": role.slug,
+                "role_id": role.role_id,
                 "display_name": role.display_name,
                 "role_path": str(role.path),
-                "thread_title": f"agent:{role.slug}",
+                "thread_title": f"agent:{role.role_id}",
                 "thread_id": thread_ids.get(role.slug),
             }
             for role in roles
@@ -451,36 +556,74 @@ def build_threads_registry(
     }
 
 
-def extract_thread_ids(payload: dict[str, Any], roles: list[RoleSpec]) -> dict[str, str]:
+def build_project_role_threads_registry(
+    project_root: Path,
+    roles: list[RoleSpec],
+    thread_ids: dict[str, str | None],
+    existing_roles: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    existing_roles = existing_roles or existing_role_threads_by_id(project_root)
+    merged = dict(existing_roles)
+    for role in roles:
+        previous = merged.get(role.role_id, {})
+        existing_thread_id = previous.get("thread_id")
+        new_thread_id = thread_ids.get(role.role_id)
+        merged[role.role_id] = {
+            "role_id": role.role_id,
+            "display_name": role.display_name,
+            "role_path": str(role.path),
+            "thread_title": f"agent:{role.role_id}",
+            "thread_id": new_thread_id or existing_thread_id,
+        }
+
+    ordered_roles = [merged[key] for key in sorted(merged)]
+    return {
+        "backend": "threads",
+        "project_root": str(project_root),
+        "reuse_key": "project_root + role_id",
+        "title_rule": "agent:<role_id>",
+        "roles": ordered_roles,
+    }
+
+
+def extract_thread_ids(
+    payload: dict[str, Any],
+    roles: list[RoleSpec],
+    existing_thread_ids: dict[str, str] | None = None,
+) -> dict[str, str]:
+    existing_thread_ids = existing_thread_ids or {}
     raw_thread_ids = payload.get("thread_ids")
     if raw_thread_ids is None:
         raw_role_threads = payload.get("role_threads")
         if isinstance(raw_role_threads, list):
             raw_thread_ids = {
-                item.get("slug"): item.get("thread_id")
+                (item.get("role_id") or item.get("slug")): item.get("thread_id")
                 for item in raw_role_threads
                 if isinstance(item, dict)
             }
+    if raw_thread_ids is None:
+        raw_thread_ids = {}
     if not isinstance(raw_thread_ids, dict):
-        raise ValueError("thread_ids must be an object mapping role slug to thread id")
+        raise ValueError("thread_ids must be an object mapping role_id to thread id")
 
     expected_slugs = {role.slug for role in roles}
     thread_ids: dict[str, str] = {}
     missing: list[str] = []
     for slug in sorted(expected_slugs):
-        value = raw_thread_ids.get(slug)
+        value = raw_thread_ids.get(slug) or existing_thread_ids.get(slug)
         if not isinstance(value, str) or not value.strip():
             missing.append(slug)
         else:
             thread_ids[slug] = value.strip()
     if missing:
-        raise ValueError("missing thread_ids for role slug(s): " + ", ".join(missing))
+        raise ValueError("missing thread_ids for role_id(s): " + ", ".join(missing))
     return thread_ids
 
 
 def build_agents_md_block(
     roles: list[RoleSpec],
     pipeline_path: Path,
+    pipeline_id: str,
     project_root: Path,
     reasoning_level: str,
     max_handoff_turns: int,
@@ -490,10 +633,11 @@ def build_agents_md_block(
     role_lines = "\n".join(f"- `{role.slug}`: `{role.path}`" for role in roles)
     bridge_dir = project_root / ".codex" / "external-access-bridge"
     if orchestration_backend == "threads":
-        registry_path = project_root / ".codex" / "orchestration" / "threads.json"
+        registry_path = pipeline_registry_path(project_root, pipeline_id)
+        shared_registry_path = role_registry_path(project_root)
         prompt_path = project_root / ".codex" / "prompts" / "thread-orchestration.md"
         role_thread_lines = "\n".join(
-            f"- `{role.slug}`: title `agent:{role.slug}`, role file `{role.path}`"
+            f"- `{role.role_id}`: title `agent:{role.role_id}`, role file `{role.path}`"
             for role in roles
         )
         return f"""{MANAGED_BEGIN}
@@ -504,7 +648,9 @@ This project uses durable Codex app threads for each configured role. The role m
 ### Source Of Truth
 
 - Shared pipeline: `{pipeline_path}`
-- Thread registry: `{registry_path}`
+- Pipeline id: `{pipeline_id}`
+- Pipeline thread registry: `{registry_path}`
+- Project role thread registry: `{shared_registry_path}`
 - Standard orchestration prompt: `{prompt_path}`
 - Default reasoning level: `{reasoning_level}`
 - Default max handoff turns: `{max_handoff_turns}`
@@ -518,12 +664,14 @@ This project uses durable Codex app threads for each configured role. The role m
 ### Thread Naming Rule
 
 - Every role thread created or repaired by the orchestrator must have a title that starts with `agent:`.
-- Use the exact title `agent:<agent name>`, where `<agent name>` is the configured role slug. Example: `agent:developer`.
-- The orchestrator must record each thread id in `{registry_path}`.
+- Use the exact title `agent:<role_id>`, where `<role_id>` is the configured role identity. Example: `agent:backend-developer`.
+- Reuse is keyed by `project_root + role_id`, not by role file path. Two different role IDs may use the same role file and must remain separate threads.
+- The orchestrator must record each shared role thread id in `{shared_registry_path}` and each pipeline's selected role references in `{registry_path}`.
 
 ### Orchestration Rules
 
 - Use durable role threads from `{registry_path}` when the user asks for the configured workflow.
+- Reuse existing project role threads from `{shared_registry_path}` by `role_id`; do not create duplicates for role IDs already registered there.
 - Do not spawn Codex subagents for the configured roles.
 - The main chat is the orchestrator. Role threads report back to the main thread for handoff.
 - The main orchestrator must not perform the substantive work of the configured role threads; it may only orchestrate, route, summarize, and relay according to the pipeline.
@@ -534,7 +682,7 @@ This project uses durable Codex app threads for each configured role. The role m
 - Follow the shared pipeline file for sequencing, dependencies, and handoff expectations.
 - If a source role file or the pipeline changes, reread it from the original path instead of duplicating it.
 - Missing local artifact or output directories are not blockers before preflight. The main orchestrator must create them before the first role-thread handoff; block only if creation fails.
-- Missing role thread IDs in `{registry_path}` are blockers. The orchestrator must ask the user to create or repair the missing durable role threads.
+- Missing role thread IDs in `{registry_path}` or `{shared_registry_path}` are blockers. The orchestrator must ask the user to create or repair the missing durable role threads.
 
 ### Scheduled Automation External Access
 
@@ -686,6 +834,7 @@ def update_agents_md(path: Path, block: str) -> tuple[str, bool]:
 def write_setup(
     project_root: Path,
     pipeline_path: Path,
+    pipeline_id: str,
     roles: list[RoleSpec],
     reasoning_level: str,
     max_handoff_turns: int,
@@ -706,6 +855,8 @@ def write_setup(
 
     thread_creation_requests: list[dict[str, str]] = []
     registry_path: Path | None = None
+    shared_registry_path: Path | None = None
+    reused_role_threads: list[dict[str, str]] = []
     if orchestration_backend == "subagents":
         agents_dir.mkdir(parents=True, exist_ok=True)
         for role in roles:
@@ -719,22 +870,53 @@ def write_setup(
         orchestration_dir.mkdir(parents=True, exist_ok=True)
         role_prompts_dir = prompts_dir / "thread-roles"
         role_prompts_dir.mkdir(parents=True, exist_ok=True)
-        registry_path = orchestration_dir / "threads.json"
+        existing_role_threads = existing_role_threads_by_id(project_root)
+        existing_thread_ids: dict[str, str] = {}
+        for role in roles:
+            existing = existing_role_threads.get(role.role_id, {})
+            thread_id = existing.get("thread_id")
+            if isinstance(thread_id, str) and thread_id.strip():
+                existing_thread_ids[role.role_id] = thread_id.strip()
+                reused_role_threads.append(
+                    {
+                        "role_id": role.role_id,
+                        "display_name": role.display_name,
+                        "thread_title": f"agent:{role.role_id}",
+                        "thread_id": thread_id.strip(),
+                    }
+                )
+
+        registry_path = pipeline_registry_path(project_root, pipeline_id)
+        registry_path.parent.mkdir(parents=True, exist_ok=True)
+        shared_registry_path = role_registry_path(project_root)
         registry = build_threads_registry(
             roles,
             pipeline_path,
+            pipeline_id,
             project_root,
             reasoning_level,
             max_handoff_turns,
             prompt_mode,
+            existing_thread_ids,
         )
         registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
         written_paths.append(str(registry_path))
+        shared_registry = build_project_role_threads_registry(
+            project_root,
+            roles,
+            existing_thread_ids,
+            existing_role_threads,
+        )
+        shared_registry_path.write_text(json.dumps(shared_registry, indent=2) + "\n", encoding="utf-8")
+        written_paths.append(str(shared_registry_path))
 
         for role in roles:
+            if role.role_id in existing_thread_ids:
+                continue
             role_prompt = build_thread_role_prompt(
                 role,
                 pipeline_path,
+                pipeline_id,
                 project_root,
                 reasoning_level,
                 max_handoff_turns,
@@ -746,8 +928,9 @@ def write_setup(
             thread_creation_requests.append(
                 {
                     "slug": role.slug,
+                    "role_id": role.role_id,
                     "display_name": role.display_name,
-                    "thread_title": f"agent:{role.slug}",
+                    "thread_title": f"agent:{role.role_id}",
                     "prompt_path": str(role_prompt_path),
                     "prompt": role_prompt,
                 }
@@ -756,6 +939,7 @@ def write_setup(
     prompt_text = build_prompt_text(
         roles,
         pipeline_path,
+        pipeline_id,
         project_root,
         reasoning_level,
         max_handoff_turns,
@@ -768,6 +952,7 @@ def write_setup(
     agents_md_block = build_agents_md_block(
         roles,
         pipeline_path,
+        pipeline_id,
         project_root,
         reasoning_level,
         max_handoff_turns,
@@ -785,6 +970,7 @@ def write_setup(
         "ok": True,
         "project_root": str(project_root),
         "pipeline_path": str(pipeline_path),
+        "pipeline_id": pipeline_id,
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
         "prompt_mode": prompt_mode,
@@ -793,9 +979,10 @@ def write_setup(
         "roles": [
             {
                 "slug": role.slug,
+                "role_id": role.role_id,
                 "display_name": role.display_name,
                 "path": str(role.path),
-                "thread_title": f"agent:{role.slug}",
+                "thread_title": f"agent:{role.role_id}",
             }
             for role in roles
         ],
@@ -803,6 +990,8 @@ def write_setup(
         "prompt_path": str(prompt_path),
         "prompt_text": prompt_text,
         "threads_registry_path": str(registry_path) if registry_path else None,
+        "role_threads_registry_path": str(shared_registry_path) if shared_registry_path else None,
+        "reused_role_threads": reused_role_threads,
         "thread_creation_requests": thread_creation_requests,
         "written_paths": written_paths,
         "warnings": warnings,
@@ -812,19 +1001,29 @@ def write_setup(
 def register_threads(
     project_root: Path,
     pipeline_path: Path,
+    pipeline_id: str,
     roles: list[RoleSpec],
     reasoning_level: str,
     max_handoff_turns: int,
     prompt_mode: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    thread_ids = extract_thread_ids(payload, roles)
+    existing_role_threads = existing_role_threads_by_id(project_root)
+    existing_thread_ids = {
+        role_id: item["thread_id"].strip()
+        for role_id, item in existing_role_threads.items()
+        if isinstance(item.get("thread_id"), str) and item["thread_id"].strip()
+    }
+    thread_ids = extract_thread_ids(payload, roles, existing_thread_ids)
     orchestration_dir = project_root / ".codex" / "orchestration"
     orchestration_dir.mkdir(parents=True, exist_ok=True)
-    registry_path = orchestration_dir / "threads.json"
+    registry_path = pipeline_registry_path(project_root, pipeline_id)
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    shared_registry_path = role_registry_path(project_root)
     registry = build_threads_registry(
         roles,
         pipeline_path,
+        pipeline_id,
         project_root,
         reasoning_level,
         max_handoff_turns,
@@ -832,25 +1031,35 @@ def register_threads(
         thread_ids,
     )
     registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+    shared_registry = build_project_role_threads_registry(
+        project_root,
+        roles,
+        thread_ids,
+        existing_role_threads,
+    )
+    shared_registry_path.write_text(json.dumps(shared_registry, indent=2) + "\n", encoding="utf-8")
     return {
         "ok": True,
         "project_root": str(project_root),
         "pipeline_path": str(pipeline_path),
+        "pipeline_id": pipeline_id,
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
         "prompt_mode": prompt_mode,
         "orchestration_backend": "threads",
         "threads_registry_path": str(registry_path),
+        "role_threads_registry_path": str(shared_registry_path),
         "role_threads": [
             {
                 "slug": role.slug,
+                "role_id": role.role_id,
                 "display_name": role.display_name,
-                "thread_title": f"agent:{role.slug}",
+                "thread_title": f"agent:{role.role_id}",
                 "thread_id": thread_ids[role.slug],
             }
             for role in roles
         ],
-        "written_paths": [str(registry_path)],
+        "written_paths": [str(registry_path), str(shared_registry_path)],
         "warnings": [],
     }
 
@@ -858,6 +1067,7 @@ def register_threads(
 def doctor(
     project_root: Path,
     pipeline_path: Path,
+    pipeline_id: str,
     roles: list[RoleSpec],
     reasoning_level: str,
     max_handoff_turns: int,
@@ -873,7 +1083,8 @@ def doctor(
         planned_paths.extend(str(project_root / ".codex" / "agents" / f"{role.slug}.toml") for role in roles)
     else:
         planned_paths = [
-            str(project_root / ".codex" / "orchestration" / "threads.json"),
+            str(role_registry_path(project_root)),
+            str(pipeline_registry_path(project_root, pipeline_id)),
             str(project_root / ".codex" / "prompts" / "thread-orchestration.md"),
             str(project_root / "AGENTS.md"),
         ]
@@ -886,6 +1097,7 @@ def doctor(
         "ok": True,
         "project_root": str(project_root),
         "pipeline_path": str(pipeline_path),
+        "pipeline_id": pipeline_id,
         "reasoning_level": reasoning_level,
         "max_handoff_turns": max_handoff_turns,
         "prompt_mode": prompt_mode,
@@ -894,14 +1106,15 @@ def doctor(
         "roles": [
             {
                 "slug": role.slug,
+                "role_id": role.role_id,
                 "display_name": role.display_name,
                 "path": str(role.path),
-                "thread_title": f"agent:{role.slug}",
+                "thread_title": f"agent:{role.role_id}",
             }
             for role in roles
         ],
         "planned_paths": planned_paths,
-        "thread_title_rule": "agent:<agent name>",
+        "thread_title_rule": "agent:<role_id>",
         "warnings": warnings,
     }
 
@@ -919,6 +1132,7 @@ def main() -> int:
         (
             project_root,
             pipeline_path,
+            pipeline_id,
             roles,
             reasoning_level,
             max_handoff_turns,
@@ -930,6 +1144,7 @@ def main() -> int:
             result = doctor(
                 project_root,
                 pipeline_path,
+                pipeline_id,
                 roles,
                 reasoning_level,
                 max_handoff_turns,
@@ -943,6 +1158,7 @@ def main() -> int:
             result = register_threads(
                 project_root,
                 pipeline_path,
+                pipeline_id,
                 roles,
                 reasoning_level,
                 max_handoff_turns,
@@ -954,6 +1170,7 @@ def main() -> int:
             result = write_setup(
                 project_root,
                 pipeline_path,
+                pipeline_id,
                 roles,
                 reasoning_level,
                 max_handoff_turns,
